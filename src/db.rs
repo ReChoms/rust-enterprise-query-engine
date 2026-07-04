@@ -5,11 +5,14 @@ use arrow_schema::Schema;
 use datafusion::prelude::*;
 use futures::StreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
+use sqlparser::ast::Statement;
+use sqlparser::dialect::GenericDialect;
+use sqlparser::parser::Parser;
 use std::error::Error;
 use std::sync::Arc;
 use tracing::{info, warn};
 
-use crate::embeddings::{get_embeddings, load_model};
+use crate::embeddings::get_embeddings;
 
 pub async fn insert_batch(
     db: &lancedb::Connection,
@@ -79,7 +82,29 @@ pub async fn insert_batch(
     Ok(())
 }
 
+fn validate_sql_is_safe(query: &str) -> Result<(), Box<dyn Error>> {
+    let dialect = GenericDialect {};
+    let ast = Parser::parse_sql(&dialect, query)
+        .map_err(|e| format!("Failed to parse SQL: {}", e))?;
+
+    if ast.is_empty() {
+        return Err("No SQL statements found.".into());
+    }
+
+    if ast.len() > 1 {
+        return Err("SECURITY VIOLATION: Multiple SQL statements detected. Only a single query is allowed.".into());
+    }
+
+    match &ast[0] {
+        Statement::Query(_) => Ok(()),
+        _ => Err("SECURITY VIOLATION: Only pure SELECT queries are permitted in automated systems.".into()),
+    }
+}
+
 pub async fn execute_sql_query(query: &str) -> Result<(), Box<dyn Error>> {
+    info!("Validating SQL query safety via AST parser...");
+    validate_sql_is_safe(query)?;
+
     info!("Spinning up Apache DataFusion Engine (Zero-Copy)...");
     let ctx = SessionContext::new();
 
@@ -94,10 +119,11 @@ pub async fn execute_sql_query(query: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-pub async fn execute_semantic_search(query: &str) -> Result<(), Box<dyn Error>> {
-    info!("Loading embedding model (BAAI/bge-base-en-v1.5)...");
-    let (model, tokenizer) = load_model()?;
-
+pub async fn execute_semantic_search(
+    query: &str,
+    model: &candle_transformers::models::bert::BertModel,
+    tokenizer: &tokenizers::Tokenizer,
+) -> Result<(), Box<dyn Error>> {
     info!("Embedding search query...");
     let embeddings = get_embeddings(&[query.to_string()], &tokenizer, &model)?;
     let query_vector = embeddings

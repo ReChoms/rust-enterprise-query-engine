@@ -15,6 +15,7 @@ use tracing::info;
 
 use crate::cli::{Cli, Commands};
 use crate::db::{execute_semantic_search, execute_sql_query};
+use crate::embeddings::load_model;
 use crate::ingest::execute_ingestion;
 use crate::llm::{ask_llm, build_routing_prompt, build_sql_prompt};
 use crate::models::{RouterDecision, SqlResponse};
@@ -27,11 +28,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     match &cli.command {
         Commands::Ingest { file, overwrite, batch_size } => {
-            execute_ingestion(file, *overwrite, *batch_size).await?;
+            info!("Loading embedding model (BAAI/bge-base-en-v1.5)...");
+            let (model, tokenizer) = load_model()?;
+            execute_ingestion(file, *overwrite, *batch_size, &model, &tokenizer).await?;
         }
         Commands::AskSemantic { query } => {
             info!(">>> Executing ASK-SEMANTIC command");
-            execute_semantic_search(&query).await?;
+            info!("Loading embedding model (BAAI/bge-base-en-v1.5)...");
+            let (model, tokenizer) = load_model()?;
+            execute_semantic_search(&query, &model, &tokenizer).await?;
         }
         Commands::Ask { query } => {
             info!(">>> Executing ASK (ROUTER) command");
@@ -42,7 +47,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             if decision.route == "SQL" {
                 execute_sql_query(&decision.query).await?;
             } else {
-                execute_semantic_search(&query).await?;
+                info!("Loading embedding model (BAAI/bge-base-en-v1.5)...");
+                let (model, tokenizer) = load_model()?;
+                execute_semantic_search(&query, &model, &tokenizer).await?;
             }
         }
         Commands::AskSql { query } => {
