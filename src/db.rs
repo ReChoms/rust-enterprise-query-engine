@@ -123,7 +123,7 @@ pub async fn execute_semantic_search(
     query: &str,
     model: &candle_transformers::models::bert::BertModel,
     tokenizer: &tokenizers::Tokenizer,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<std::collections::HashMap<String, String>, Box<dyn Error>> {
     info!("Embedding search query...");
     let embeddings = get_embeddings(&[query.to_string()], &tokenizer, &model)?;
     let query_vector = embeddings
@@ -152,15 +152,7 @@ pub async fn execute_semantic_search(
         .await
         .map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
 
-    info!("--- Search Results ---");
-
-    #[derive(serde::Serialize)]
-    struct SearchResultPayload {
-        distance: f32,
-        kunnr: String,
-        name: String,
-        city: String,
-    }
+    let mut retrieved_chunks = std::collections::HashMap::new();
 
     while let Some(result) = stream.next().await {
         let batch = result.map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
@@ -174,26 +166,23 @@ pub async fn execute_semantic_search(
         let kunnr_arr = batch
             .column_by_name("kunnr")
             .and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>());
-        let dist_arr = batch
-            .column_by_name("_distance")
-            .and_then(|c| c.as_any().downcast_ref::<arrow_array::Float32Array>());
 
-        if let (Some(names), Some(cities), Some(kunnrs), Some(distances)) =
-            (name_arr, city_arr, kunnr_arr, dist_arr)
+        if let (Some(names), Some(cities), Some(kunnrs)) =
+            (name_arr, city_arr, kunnr_arr)
         {
             for i in 0..batch.num_rows() {
-                let payload = SearchResultPayload {
-                    distance: distances.value(i),
-                    kunnr: kunnrs.value(i).to_string(),
-                    name: names.value(i).to_string(),
-                    city: cities.value(i).to_string(),
-                };
-                println!("{}", serde_json::to_string(&payload)?);
+                let kunnr = kunnrs.value(i).to_string();
+                let name = names.value(i).to_string();
+                let city = cities.value(i).to_string();
+                
+                // Reconstruct the exact semantic string embedded during ingestion
+                let chunk_text = format!("Customer ID {}: {} located in {}", kunnr, name, city);
+                retrieved_chunks.insert(kunnr, chunk_text);
             }
         } else {
             warn!("WARNING: Failed to read database columns. Search results skipped.");
         }
     }
 
-    Ok(())
+    Ok(retrieved_chunks)
 }

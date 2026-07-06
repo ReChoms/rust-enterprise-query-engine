@@ -30,3 +30,11 @@ pub struct RouterDecision {
 pub struct SqlResponse {
     pub query: String,
 }
+
+#[derive(Deserialize, Debug)]
+pub struct SemanticResponse {
+    pub answer_found: bool,
+    pub answer: String,
+    pub exact_quote: String,
+    pub source_chunk_id: String,
+}
