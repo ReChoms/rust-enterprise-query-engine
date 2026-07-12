@@ -1,6 +1,7 @@
-use crate::models::{OllamaRequest, OllamaResponse, SemanticResponse, SqlResponse};
+use crate::models::{OllamaRequest, OllamaResponse, SemanticResponse};
 use std::collections::HashMap;
 use std::error::Error;
+use serde::de::DeserializeOwned;
 
 /// Sends a prompt to the local Ollama server running Llama 3.2
 pub async fn ask_llm(prompt: &str) -> Result<String, Box<dyn Error>> {
@@ -35,7 +36,9 @@ pub fn build_sql_prompt(user_question: &str) -> String {
     )
 }
 
-pub fn verify_and_parse_sql_generation(raw_output: &str) -> Result<SqlResponse, Box<dyn Error>> {
+/// Strips hallucinated markdown wrappers from LLM outputs and safely parses 
+/// the remaining JSON into any strongly typed Rust struct.
+pub fn parse_llm_json<T: DeserializeOwned>(raw_output: &str) -> Result<T, Box<dyn Error>> {
     let clean_json = raw_output
         .trim()
         .strip_prefix("```json")
@@ -46,28 +49,15 @@ pub fn verify_and_parse_sql_generation(raw_output: &str) -> Result<SqlResponse, 
         .unwrap_or(raw_output.trim())
         .trim();
 
-    let response: SqlResponse = serde_json::from_str(clean_json)
-        .map_err(|e| format!("Failed to parse SqlResponse: {}. Raw text: {}", e, clean_json))?;
-        
-    Ok(response)
+    serde_json::from_str(clean_json)
+        .map_err(|e| format!("Failed to parse JSON: {}. Raw text: {}", e, clean_json).into())
 }
 
 pub fn verify_and_parse_llm_generation(
     raw_output: &str,
     retrieved_chunks: &HashMap<String, String>,
 ) -> Result<SemanticResponse, Box<dyn Error>> {
-    let clean_json = raw_output
-        .trim()
-        .strip_prefix("```json")
-        .unwrap_or(raw_output.trim())
-        .strip_prefix("```")
-        .unwrap_or(raw_output.trim())
-        .strip_suffix("```")
-        .unwrap_or(raw_output.trim())
-        .trim();
-
-    let response: SemanticResponse = serde_json::from_str(clean_json)
-        .map_err(|e| format!("Failed to parse SemanticResponse: {}. Raw text: {}", e, clean_json))?;
+    let response: SemanticResponse = parse_llm_json(raw_output)?;
 
     if response.answer_found {
         let source_text = retrieved_chunks.get(&response.source_chunk_id).ok_or_else(|| {
@@ -110,5 +100,37 @@ pub fn build_semantic_prompt(user_question: &str, chunks: &HashMap<String, Strin
         3. If the answer is not found in the chunks, set `answer_found` to false, and leave the other fields blank.\n\n\
         User Question: \"{}\"\nA: ",
         context, user_question
+    )
+}
+
+/// Resolves Pitfall 4 (Raw Query Embedding) by intercepting the user's raw question
+/// before it reaches the tensor embedding pipeline.
+/// 
+/// Why: Dense vector math is excellent at semantic similarity but terrible at 
+/// boolean logic (like "NOT") and heavily over-indexes exact alphanumeric strings. 
+/// If a user asks "NOT KUNNR 1000", passing this directly to LanceDB will likely 
+/// retrieve customer 1000 because the vector mathematically aligns with the specific number.
+/// 
+/// This prompt forces a local LLM to parse the query into:
+/// 1. `intent`: The pure semantic meaning (safe for vector math).
+/// 2. `filters`: Explicit IDs and logical exclusions (used later for deterministic Hybrid Search).
+pub fn build_question_parser_prompt(user_question: &str) -> String {
+    format!(
+        "You are an expert SAP data engineer. Your task is to parse the user's question into pure semantic intent and explicit filters.\n\n\
+        RULES:\n\
+        1. You must ONLY output raw JSON. Do not wrap it in markdown. Do not add conversational text.\n\
+        2. The JSON must exactly match this schema:\n\
+           {{\n\
+             \"intent\": \"The pure semantic meaning, without hard IDs or strict exclusions\",\n\
+             \"filters\": [\"EXACT_ID_1\", \"NOT EXACT_ID_2\"]\n\
+           }}\n\
+        3. If there are no explicit IDs or exclusions, leave the `filters` array empty.\n\n\
+        Examples:\n\
+        Q: \"Which customer in Berlin is NOT KUNNR 1000?\"\n\
+        A: {{\"intent\": \"customer in Berlin\", \"filters\": [\"NOT KUNNR 1000\"]}}\n\n\
+        Q: \"Find SAP customer 00001042.\"\n\
+        A: {{\"intent\": \"Find SAP customer\", \"filters\": [\"00001042\"]}}\n\n\
+        User Question: \"{}\"\nA: ",
+        user_question
     )
 }

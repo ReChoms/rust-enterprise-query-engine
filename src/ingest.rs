@@ -1,6 +1,6 @@
 use arrow_array::Array;
 use arrow_schema::{DataType, Field, Schema};
-use lancedb::query::ExecutableQuery;
+use lancedb::query::{ExecutableQuery, QueryBase};
 use std::collections::HashSet;
 use std::error::Error;
 use std::fs::File;
@@ -102,7 +102,7 @@ async fn find_existing_in_db(db: &lancedb::Connection, ids_for_sql: &[String]) -
     if let Ok(table) = db.open_table("customers").execute().await {
         let filter = format!("kunnr IN ({})", ids_for_sql.join(", "));
         use futures::StreamExt;
-        if let Ok(mut stream) = table.query().filter(filter).execute().await {
+        if let Ok(mut stream) = table.query().only_if(filter).execute().await {
             while let Some(batch) = stream.next().await {
                 if let Ok(batch) = batch {
                     if let Some(col) = batch.column_by_name("kunnr") {

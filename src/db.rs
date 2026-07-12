@@ -3,14 +3,13 @@ use arrow_array::types::Float32Type;
 use arrow_array::{Array, RecordBatch, RecordBatchIterator, StringArray};
 use arrow_schema::Schema;
 use datafusion::prelude::*;
-use futures::StreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
 use sqlparser::ast::Statement;
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use std::error::Error;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::embeddings::get_embeddings;
 
@@ -119,68 +118,67 @@ pub async fn execute_sql_query(query: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-pub async fn execute_semantic_search(
-    query: &str,
-    model: &candle_transformers::models::bert::BertModel,
-    tokenizer: &tokenizers::Tokenizer,
-) -> Result<std::collections::HashMap<String, String>, Box<dyn Error>> {
-    info!("Embedding search query...");
-    let embeddings = get_embeddings(&[query.to_string()], &tokenizer, &model)?;
-    let query_vector = embeddings
-        .into_iter()
-        .next()
-        .ok_or("Failed to generate embedding")?;
-
-    info!("Connecting to LanceDB...");
-    let db = lancedb::connect("data/sap_vectors")
-        .execute()
-        .await
-        .map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
-    let table = db
-        .open_table("customers")
-        .execute()
-        .await
-        .map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
-
-    info!("Executing semantic search...");
-    let mut stream = table
-        .query()
-        .nearest_to(query_vector)
-        .unwrap()
-        .limit(5)
-        .execute()
-        .await
-        .map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
-
-    let mut retrieved_chunks = std::collections::HashMap::new();
-
+async fn extract_chunks_from_stream(
+    mut stream: lancedb::arrow::SendableRecordBatchStream,
+    retrieved_chunks: &mut std::collections::HashMap<String, String>,
+) -> Result<(), Box<dyn Error>> {
+    use futures::StreamExt;
+    
     while let Some(result) = stream.next().await {
         let batch = result.map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
 
-        let name_arr = batch
-            .column_by_name("name")
-            .and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>());
-        let city_arr = batch
-            .column_by_name("city")
-            .and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>());
-        let kunnr_arr = batch
-            .column_by_name("kunnr")
-            .and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>());
+        let name_arr = batch.column_by_name("name").and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>());
+        let city_arr = batch.column_by_name("city").and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>());
+        let kunnr_arr = batch.column_by_name("kunnr").and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>());
 
-        if let (Some(names), Some(cities), Some(kunnrs)) =
-            (name_arr, city_arr, kunnr_arr)
-        {
+        if let (Some(names), Some(cities), Some(kunnrs)) = (name_arr, city_arr, kunnr_arr) {
             for i in 0..batch.num_rows() {
                 let kunnr = kunnrs.value(i).to_string();
                 let name = names.value(i).to_string();
                 let city = cities.value(i).to_string();
                 
-                // Reconstruct the exact semantic string embedded during ingestion
+                // Reconstruct the exact semantic string
                 let chunk_text = format!("Customer ID {}: {} located in {}", kunnr, name, city);
                 retrieved_chunks.insert(kunnr, chunk_text);
             }
+        }
+    }
+    Ok(())
+}
+
+pub async fn execute_semantic_search(
+    query: &str,
+    filters: &[String],
+    model: &candle_transformers::models::bert::BertModel,
+    tokenizer: &tokenizers::Tokenizer,
+) -> Result<std::collections::HashMap<String, String>, Box<dyn Error>> {
+    info!("Embedding search query...");
+    let embeddings = get_embeddings(&[query.to_string()], &tokenizer, &model)?;
+    let query_vector = embeddings.into_iter().next().ok_or("Failed to generate embedding")?;
+
+    info!("Connecting to LanceDB...");
+    let db = lancedb::connect("data/sap_vectors").execute().await.map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
+    let table = db.open_table("customers").execute().await.map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
+
+    let mut retrieved_chunks = std::collections::HashMap::new();
+
+    info!("Executing semantic search (Fuzzy Pass)...");
+    let vector_stream = table.query().nearest_to(query_vector).unwrap().limit(5).execute().await.map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
+    extract_chunks_from_stream(vector_stream, &mut retrieved_chunks).await?;
+
+    info!("Executing exact keyword search (Deterministic Pass)...");
+    for filter in filters {
+        let is_not = filter.starts_with("NOT ");
+        let term = if is_not { filter.strip_prefix("NOT ").unwrap() } else { filter.as_str() };
+
+        if is_not {
+            // Programmatically destroy chunks containing negative constraints
+            retrieved_chunks.retain(|_, v| !v.contains(term));
         } else {
-            warn!("WARNING: Failed to read database columns. Search results skipped.");
+            // Deterministically retrieve exactly matching chunks
+            let sql = format!("sentence LIKE '%{}%'", term);
+            let exact_stream = table.query().only_if(sql).limit(5).execute().await.map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
+            extract_chunks_from_stream(exact_stream, &mut retrieved_chunks).await?;
         }
     }
 

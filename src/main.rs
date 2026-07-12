@@ -17,8 +17,8 @@ use crate::cli::{Cli, Commands};
 use crate::db::{execute_semantic_search, execute_sql_query};
 use crate::embeddings::load_model;
 use crate::ingest::execute_ingestion;
-use crate::llm::{ask_llm, build_routing_prompt, build_sql_prompt, build_semantic_prompt, verify_and_parse_llm_generation, verify_and_parse_sql_generation};
-use crate::models::RouterDecision;
+use crate::llm::{ask_llm, build_question_parser_prompt, build_routing_prompt, build_sql_prompt, build_semantic_prompt, verify_and_parse_llm_generation, parse_llm_json};
+use crate::models::{ParsedQuestion, RouterDecision, SqlResponse};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -34,11 +34,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         Commands::AskSemantic { query } => {
             info!(">>> Executing ASK-SEMANTIC command");
+            
+            info!("Parsing raw query to separate semantic intent from exact filters...");
+            let parser_prompt = build_question_parser_prompt(&query);
+            let raw_parser_output = ask_llm(&parser_prompt).await?;
+            let parsed_query: ParsedQuestion = parse_llm_json(&raw_parser_output)?;
+
             info!("Loading embedding model (BAAI/bge-base-en-v1.5)...");
             let (model, tokenizer) = load_model()?;
-            let chunks = execute_semantic_search(&query, &model, &tokenizer).await?;
+            
+            // CRITICAL FIX: We execute the vector math strictly on the `intent`, 
+            // and pass `filters` for the exact SQL string match.
+            let chunks = execute_semantic_search(&parsed_query.intent, &parsed_query.filters, &model, &tokenizer).await?;
             
             info!("Passing retrieved chunks to LLM for deterministic generation...");
+            // We still pass the original full `query` to the final answering LLM so it knows 
+            // about the user's constraints (e.g. "NOT 1000") when generating the final answer.
             let semantic_prompt = build_semantic_prompt(&query, &chunks);
             let raw_llm_output = ask_llm(&semantic_prompt).await?;
             let final_payload = verify_and_parse_llm_generation(&raw_llm_output, &chunks)?;
@@ -54,9 +65,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
             if decision.route == "SQL" {
                 execute_sql_query(&decision.query).await?;
             } else {
+                info!("Parsing raw query to separate semantic intent from exact filters...");
+                let parser_prompt = build_question_parser_prompt(&query);
+                let raw_parser_output = ask_llm(&parser_prompt).await?;
+                let parsed_query: ParsedQuestion = parse_llm_json(&raw_parser_output)?;
+
                 info!("Loading embedding model (BAAI/bge-base-en-v1.5)...");
                 let (model, tokenizer) = load_model()?;
-                let chunks = execute_semantic_search(&query, &model, &tokenizer).await?;
+                
+                // Pass parsed intent and exact filters instead of raw query
+                let chunks = execute_semantic_search(&parsed_query.intent, &parsed_query.filters, &model, &tokenizer).await?;
                 
                 info!("Passing retrieved chunks to LLM for deterministic generation...");
                 let semantic_prompt = build_semantic_prompt(&query, &chunks);
@@ -75,7 +93,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let full_prompt = build_sql_prompt(&query);
 
             let raw_json = ask_llm(&full_prompt).await?;
-            let response = verify_and_parse_sql_generation(&raw_json)?;
+            let response: SqlResponse = parse_llm_json(&raw_json)?;
             execute_sql_query(&response.query).await?;
         }
     }
