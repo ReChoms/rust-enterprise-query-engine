@@ -41,7 +41,7 @@ pub struct SemanticResponse {
 
 /// Data schema to separate natural language intent from exact alphanumeric constraints.
 /// 
-/// Why: Fixes Pitfall 4. We cannot feed raw SAP IDs (like "1000") or logical 
+/// Why: Fixes Research Area 4. We cannot feed raw SAP IDs (like "1000") or logical 
 /// negations (like "NOT") into dense vector embeddings, because the mathematics 
 /// will incorrectly index on the numbers rather than the semantic meaning.
 /// By forcing the LLM to map its response into this strict JSON schema, we isolate 

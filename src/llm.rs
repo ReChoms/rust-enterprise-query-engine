@@ -103,7 +103,7 @@ pub fn build_semantic_prompt(user_question: &str, chunks: &HashMap<String, Strin
     )
 }
 
-/// Resolves Pitfall 4 (Raw Query Embedding) by intercepting the user's raw question
+/// Resolves Research Area 4 (Raw Query Embedding) by intercepting the user's raw question
 /// before it reaches the tensor embedding pipeline.
 /// 
 /// Why: Dense vector math is excellent at semantic similarity but terrible at 
