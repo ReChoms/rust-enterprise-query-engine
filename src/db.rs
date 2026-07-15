@@ -137,9 +137,13 @@ async fn extract_chunks_from_stream(
                 let name = names.value(i).to_string();
                 let city = cities.value(i).to_string();
                 
-                // Reconstruct the exact semantic string
-                let chunk_text = format!("Customer ID {}: {} located in {}", kunnr, name, city);
-                retrieved_chunks.insert(kunnr, chunk_text);
+                // Maintain structured relational boundaries instead of flattening
+                let chunk_json = serde_json::json!({
+                    "kunnr": kunnr,
+                    "name": name,
+                    "city": city
+                }).to_string();
+                retrieved_chunks.insert(kunnr, chunk_json);
             }
         }
     }
@@ -181,6 +185,39 @@ pub async fn execute_semantic_search(
             extract_chunks_from_stream(exact_stream, &mut retrieved_chunks).await?;
         }
     }
+
+    Ok(retrieved_chunks)
+}
+
+pub async fn execute_fallback_search(
+    intent: &str,
+) -> Result<std::collections::HashMap<String, String>, Box<dyn Error>> {
+    info!("Vector search failed. Executing deterministic fallback search (Absence Proof) for: {}", intent);
+    
+    let db = lancedb::connect("data/sap_vectors").execute().await.map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
+    let table = db.open_table("customers").execute().await.map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
+
+    let mut retrieved_chunks = std::collections::HashMap::new();
+
+    // Sanitize to prevent SQL injection or parser crashes on quotes
+    let sanitized_intent = intent.replace("'", "");
+    
+    // Dynamically build a robust AND query for each individual word
+    let conditions: Vec<String> = sanitized_intent
+        .split_whitespace()
+        .map(|word| format!("sentence LIKE '%{}%'", word))
+        .collect();
+    
+    let sql = conditions.join(" AND ");
+    
+    let exact_stream = table.query()
+        .only_if(sql)
+        .limit(5)
+        .execute()
+        .await
+        .map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
+        
+    extract_chunks_from_stream(exact_stream, &mut retrieved_chunks).await?;
 
     Ok(retrieved_chunks)
 }

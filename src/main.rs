@@ -14,7 +14,7 @@ use std::error::Error;
 use tracing::info;
 
 use crate::cli::{Cli, Commands};
-use crate::db::{execute_semantic_search, execute_sql_query};
+use crate::db::{execute_fallback_search, execute_semantic_search, execute_sql_query};
 use crate::embeddings::load_model;
 use crate::ingest::execute_ingestion;
 use crate::llm::{ask_llm, build_question_parser_prompt, build_routing_prompt, build_sql_prompt, build_semantic_prompt, verify_and_parse_llm_generation, parse_llm_json};
@@ -52,7 +52,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // about the user's constraints (e.g. "NOT 1000") when generating the final answer.
             let semantic_prompt = build_semantic_prompt(&query, &chunks);
             let raw_llm_output = ask_llm(&semantic_prompt).await?;
-            let final_payload = verify_and_parse_llm_generation(&raw_llm_output, &chunks)?;
+            let mut final_payload = verify_and_parse_llm_generation(&raw_llm_output, &chunks)?;
+            
+            if !final_payload.answer_found {
+                info!("Vector search failed. Triggering deterministic fallback (Absence Proof)...");
+                let fallback_chunks = execute_fallback_search(&parsed_query.intent).await?;
+                
+                if !fallback_chunks.is_empty() {
+                    info!("Fallback search found missing chunks. Re-querying LLM...");
+                    let fallback_prompt = build_semantic_prompt(&query, &fallback_chunks);
+                    let raw_fallback_output = ask_llm(&fallback_prompt).await?;
+                    final_payload = verify_and_parse_llm_generation(&raw_fallback_output, &fallback_chunks)?;
+                } else {
+                    info!("Absence mathematically proven. The data does not exist in the corpus.");
+                }
+            }
             
             println!("{}", serde_json::to_string(&final_payload)?);
         }
@@ -79,7 +93,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 info!("Passing retrieved chunks to LLM for deterministic generation...");
                 let semantic_prompt = build_semantic_prompt(&query, &chunks);
                 let raw_llm_output = ask_llm(&semantic_prompt).await?;
-                let final_payload = verify_and_parse_llm_generation(&raw_llm_output, &chunks)?;
+                let mut final_payload = verify_and_parse_llm_generation(&raw_llm_output, &chunks)?;
+                
+                if !final_payload.answer_found {
+                    info!("Vector search failed. Triggering deterministic fallback (Absence Proof)...");
+                    let fallback_chunks = execute_fallback_search(&parsed_query.intent).await?;
+                    
+                    if !fallback_chunks.is_empty() {
+                        info!("Fallback search found missing chunks. Re-querying LLM...");
+                        let fallback_prompt = build_semantic_prompt(&query, &fallback_chunks);
+                        let raw_fallback_output = ask_llm(&fallback_prompt).await?;
+                        final_payload = verify_and_parse_llm_generation(&raw_fallback_output, &fallback_chunks)?;
+                    } else {
+                        info!("Absence mathematically proven. The data does not exist in the corpus.");
+                    }
+                }
                 
                 println!("{}", serde_json::to_string(&final_payload)?);
             }
