@@ -8,36 +8,35 @@ use std::sync::Arc;
 use tokenizers::Tokenizer;
 use tracing::info;
 
-fn download_file(url: &str, dest: &str) -> Result<String> {
+async fn download_file(url: &str, dest: &str) -> Result<String> {
     if !Path::new(dest).exists() {
         info!("Downloading {}...", dest);
-        let resp = ureq::get(url).call()?;
-        let mut out = File::create(dest)?;
-        std::io::copy(&mut resp.into_reader(), &mut out)?;
+        let resp = reqwest::get(url).await?;
+        let bytes = resp.bytes().await?;
+        std::fs::write(dest, bytes)?;
     }
     Ok(dest.to_string())
 }
 
-pub fn load_model() -> Result<(Arc<BertModel>, Arc<Tokenizer>)> {
+pub async fn load_model() -> Result<(Arc<BertModel>, Arc<Tokenizer>)> {
     info!("Fetching safetensors and config...");
 
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let data_dir = format!("{}/data", manifest_dir);
+    let data_dir = "data";
 
-    std::fs::create_dir_all(&data_dir)?;
+    std::fs::create_dir_all(data_dir)?;
 
     let config_path = download_file(
         "https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/main/config.json",
         &format!("{}/config.json", data_dir),
-    )?;
+    ).await?;
     let tokenizer_path = download_file(
         "https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/main/tokenizer.json",
         &format!("{}/tokenizer.json", data_dir),
-    )?;
+    ).await?;
     let weights_path = download_file(
         "https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/main/model.safetensors",
         &format!("{}/model.safetensors", data_dir),
-    )?;
+    ).await?;
 
     info!("Building Tokenizer and Tensor Neural Network...");
 

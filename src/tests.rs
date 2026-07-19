@@ -2,44 +2,51 @@
 mod integration_tests {
     use crate::db::execute_semantic_search;
     use crate::ingest::execute_ingestion;
+    use crate::embeddings::load_model;
     use crate::llm::{ask_llm, build_routing_prompt};
     use crate::models::RouterDecision;
-    use std::fs::File;
     use std::io::Write;
-    use std::path::Path;
+    use std::sync::Arc;
+    use tempfile::{tempdir, NamedTempFile};
 
     #[tokio::test]
     async fn test_dummy_data_pipeline() {
-        // 1. Create a dummy CSV
-        let csv_path = "/tmp/dummy_kna1.csv";
-        let mut file = File::create(csv_path).unwrap();
-        writeln!(file, "kunnr,name1,ort01,land1").unwrap();
-        writeln!(file, "DUMMY001,Acme Corp,Berlin,DE").unwrap();
-        writeln!(file, "DUMMY002,Global Tech,Munich,DE").unwrap();
+        let db_dir = tempdir().unwrap();
+        let db_uri = db_dir.path().to_str().unwrap();
+
+        let mut dummy_csv = NamedTempFile::new().unwrap();
+        writeln!(dummy_csv, "kunnr,name1,ort01,land1").unwrap();
+        writeln!(dummy_csv, "DUMMY001,Acme Corp,Berlin,DE").unwrap();
+        writeln!(dummy_csv, "DUMMY002,Global Tech,Munich,DE").unwrap();
         
-        // 2. Trigger Ingestion WITHOUT overwrite (safely appending to your real database)
-        let result = execute_ingestion(csv_path, false, 2).await;
+        let csv_path = dummy_csv.path().to_str().unwrap();
+
+        let (model, tokenizer) = load_model().await.expect("Failed to load model");
+
+        // Trigger Ingestion safely into the isolated temp directory
+        let result = execute_ingestion(csv_path, db_uri, false, 2, Arc::clone(&model), Arc::clone(&tokenizer)).await;
         assert!(result.is_ok(), "Ingestion pipeline panicked");
 
-        // 3. Verify LanceDB files exist on disk
-        let db_path = Path::new("data/sap_vectors/customers.lance");
+        // Verify LanceDB files exist inside the temp directory
+        let db_path = db_dir.path().join("customers.lance");
         assert!(db_path.exists(), "LanceDB failed to write physical files");
-        
-        // Cleanup
-        std::fs::remove_file(csv_path).unwrap();
     }
 
     #[tokio::test]
+    #[ignore = "Heavy E2E Test: Ingests 20,210 rows from scratch due to test isolation"]
     async fn test_real_sap_pipeline() {
-        // 1. Ingest the real data WITHOUT overwrite. 
-        // Because of our deduplication loop, this finishes instantly if the 20,210 rows already exist!
+        let db_dir = tempdir().unwrap();
+        let db_uri = db_dir.path().to_str().unwrap();
         let csv_path = "data/kna1.csv";
-        let result = execute_ingestion(csv_path, false, 128).await;
+
+        let (model, tokenizer) = load_model().await.expect("Failed to load model");
+
+        let result = execute_ingestion(csv_path, db_uri, false, 128, Arc::clone(&model), Arc::clone(&tokenizer)).await;
         assert!(result.is_ok(), "Ingestion pipeline panicked");
 
-        // 2. Query the real data
-        let result = execute_semantic_search("technology companies in Berlin").await;
-        assert!(result.is_ok(), "Semantic search execution failed");
+        let filters: Vec<String> = vec![];
+        let search_result = execute_semantic_search("technology companies in Berlin", db_uri, &filters, Arc::clone(&model), Arc::clone(&tokenizer)).await;
+        assert!(search_result.is_ok(), "Semantic search execution failed");
     }
 
     #[tokio::test]

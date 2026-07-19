@@ -145,6 +145,7 @@ async fn extract_chunks_from_stream(
 
 pub async fn execute_semantic_search(
     query: &str,
+    db_uri: &str,
     filters: &[String],
     model: Arc<candle_transformers::models::bert::BertModel>,
     tokenizer: Arc<tokenizers::Tokenizer>,
@@ -154,7 +155,7 @@ pub async fn execute_semantic_search(
     let query_vector = embeddings.into_iter().next().ok_or_else(|| anyhow!("Failed to generate embedding"))?;
 
     info!("Connecting to LanceDB...");
-    let db = lancedb::connect("data/sap_vectors").execute().await?;
+    let db = lancedb::connect(db_uri).execute().await?;
     let table = db.open_table("customers").execute().await?;
 
     let mut retrieved_chunks = std::collections::HashMap::new();
@@ -184,10 +185,11 @@ pub async fn execute_semantic_search(
 
 pub async fn execute_fallback_search(
     intent: &str,
+    db_uri: &str,
 ) -> Result<std::collections::HashMap<String, String>> {
     info!("Vector search failed. Executing deterministic fallback search (Absence Proof) for: {}", intent);
     
-    let db = lancedb::connect("data/sap_vectors").execute().await?;
+    let db = lancedb::connect(db_uri).execute().await?;
     let table = db.open_table("customers").execute().await?;
 
     let mut retrieved_chunks = std::collections::HashMap::new();

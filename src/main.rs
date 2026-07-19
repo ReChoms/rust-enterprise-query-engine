@@ -30,8 +30,8 @@ async fn main() -> Result<()> {
     match &cli.command {
         Commands::Ingest { file, overwrite, batch_size } => {
             info!("Loading embedding model (BAAI/bge-base-en-v1.5)...");
-            let (model, tokenizer) = load_model()?;
-            execute_ingestion(file, *overwrite, *batch_size, Arc::clone(&model), Arc::clone(&tokenizer)).await?;
+            let (model, tokenizer) = load_model().await?;
+            execute_ingestion(file, "data/sap_vectors", *overwrite, *batch_size, Arc::clone(&model), Arc::clone(&tokenizer)).await?;
         }
         Commands::AskSemantic { query } => {
             info!(">>> Executing ASK-SEMANTIC command");
@@ -42,11 +42,11 @@ async fn main() -> Result<()> {
             let parsed_query: ParsedQuestion = parse_llm_json(&raw_parser_output)?;
 
             info!("Loading embedding model (BAAI/bge-base-en-v1.5)...");
-            let (model, tokenizer) = load_model()?;
+            let (model, tokenizer) = load_model().await?;
             
-            // CRITICAL FIX: We execute the vector math strictly on the `intent`, 
+            // We execute the vector math strictly on the `intent`, 
             // and pass `filters` for the exact SQL string match.
-            let chunks = execute_semantic_search(&parsed_query.intent, &parsed_query.filters, Arc::clone(&model), Arc::clone(&tokenizer)).await?;
+            let chunks = execute_semantic_search(&parsed_query.intent, "data/sap_vectors", &parsed_query.filters, Arc::clone(&model), Arc::clone(&tokenizer)).await?;
             
             info!("Passing retrieved chunks to LLM for deterministic generation...");
             // We still pass the original full `query` to the final answering LLM so it knows 
@@ -57,7 +57,7 @@ async fn main() -> Result<()> {
             
             if !final_payload.answer_found {
                 info!("Vector search failed. Triggering deterministic fallback (Absence Proof)...");
-                let fallback_chunks = execute_fallback_search(&parsed_query.intent).await?;
+                let fallback_chunks = execute_fallback_search(&parsed_query.intent, "data/sap_vectors").await?;
                 
                 if !fallback_chunks.is_empty() {
                     info!("Fallback search found missing chunks. Re-querying LLM...");
@@ -86,10 +86,10 @@ async fn main() -> Result<()> {
                 let parsed_query: ParsedQuestion = parse_llm_json(&raw_parser_output)?;
 
                 info!("Loading embedding model (BAAI/bge-base-en-v1.5)...");
-                let (model, tokenizer) = load_model()?;
+                let (model, tokenizer) = load_model().await?;
                 
                 // Pass parsed intent and exact filters instead of raw query
-                let chunks = execute_semantic_search(&parsed_query.intent, &parsed_query.filters, Arc::clone(&model), Arc::clone(&tokenizer)).await?;
+                let chunks = execute_semantic_search(&parsed_query.intent, "data/sap_vectors", &parsed_query.filters, Arc::clone(&model), Arc::clone(&tokenizer)).await?;
                 
                 info!("Passing retrieved chunks to LLM for deterministic generation...");
                 let semantic_prompt = build_semantic_prompt(&query, &chunks);
@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
                 
                 if !final_payload.answer_found {
                     info!("Vector search failed. Triggering deterministic fallback (Absence Proof)...");
-                    let fallback_chunks = execute_fallback_search(&parsed_query.intent).await?;
+                    let fallback_chunks = execute_fallback_search(&parsed_query.intent, "data/sap_vectors").await?;
                     
                     if !fallback_chunks.is_empty() {
                         info!("Fallback search found missing chunks. Re-querying LLM...");

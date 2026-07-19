@@ -14,6 +14,7 @@ use crate::models::Kna1Row;
 /// Main entry point for the ingestion pipeline
 pub async fn execute_ingestion(
     csv_path: &str,
+    db_uri: &str,
     overwrite: bool,
     batch_size: usize,
     model: Arc<candle_transformers::models::bert::BertModel>,
@@ -22,7 +23,7 @@ pub async fn execute_ingestion(
     info!(">>> Executing INGEST command on file: {}", csv_path);
 
     info!("Connecting to LanceDB...");
-    let db = lancedb::connect("data/sap_vectors")
+    let db = lancedb::connect(db_uri)
         .execute()
         .await?;
 
