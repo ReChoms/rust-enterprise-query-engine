@@ -1,10 +1,10 @@
 use crate::models::{OllamaRequest, OllamaResponse, SemanticResponse};
 use std::collections::HashMap;
-use std::error::Error;
+use anyhow::{anyhow, bail, Result};
 use serde::de::DeserializeOwned;
 
 /// Sends a prompt to the local Ollama server running Llama 3.2
-pub async fn ask_llm(prompt: &str) -> Result<String, Box<dyn Error>> {
+pub async fn ask_llm(prompt: &str) -> Result<String> {
     let req_body = OllamaRequest {
         model: "llama3.2:latest".to_string(),
         prompt: prompt.to_string(),
@@ -38,7 +38,7 @@ pub fn build_sql_prompt(user_question: &str) -> String {
 
 /// Strips hallucinated markdown wrappers from LLM outputs and safely parses 
 /// the remaining JSON into any strongly typed Rust struct.
-pub fn parse_llm_json<T: DeserializeOwned>(raw_output: &str) -> Result<T, Box<dyn Error>> {
+pub fn parse_llm_json<T: DeserializeOwned>(raw_output: &str) -> Result<T> {
     let clean_json = raw_output
         .trim()
         .strip_prefix("```json")
@@ -50,29 +50,28 @@ pub fn parse_llm_json<T: DeserializeOwned>(raw_output: &str) -> Result<T, Box<dy
         .trim();
 
     serde_json::from_str(clean_json)
-        .map_err(|e| format!("Failed to parse JSON: {}. Raw text: {}", e, clean_json).into())
+        .map_err(|e| anyhow!("Failed to parse JSON: {}. Raw text: {}", e, clean_json))
 }
 
 pub fn verify_and_parse_llm_generation(
     raw_output: &str,
     retrieved_chunks: &HashMap<String, String>,
-) -> Result<SemanticResponse, Box<dyn Error>> {
+) -> Result<SemanticResponse> {
     let response: SemanticResponse = parse_llm_json(raw_output)?;
 
     if response.answer_found {
         let source_text = retrieved_chunks.get(&response.source_chunk_id).ok_or_else(|| {
-            format!(
+            anyhow!(
                 "SECURITY VIOLATION: LLM cited a non-existent chunk ID: {}",
                 response.source_chunk_id
             )
         })?;
 
         if !source_text.contains(&response.exact_quote) {
-            return Err(format!(
+            bail!(
                 "SECURITY VIOLATION: Hallucination detected. The exact quote does not exist in the source document. Quote: '{}'",
                 response.exact_quote
-            )
-            .into());
+            );
         }
     }
 

@@ -7,7 +7,7 @@ use lancedb::query::{ExecutableQuery, QueryBase};
 use sqlparser::ast::Statement;
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
-use std::error::Error;
+use anyhow::{anyhow, bail, Result};
 use std::sync::Arc;
 use tracing::info;
 
@@ -19,7 +19,7 @@ pub async fn insert_batch(
     records: &[(String, String, String)],
     documents: &[String],
     embeddings: Vec<Vec<f32>>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<()> {
     let kunnr_array = StringArray::from(
         records
             .iter()
@@ -57,8 +57,7 @@ pub async fn insert_batch(
             Arc::new(sentence_array),
             Arc::new(vector_array),
         ],
-    )
-    .map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
+    )?;
 
     let batches = RecordBatchIterator::new(vec![Ok(batch)], schema.clone());
 
@@ -66,41 +65,35 @@ pub async fn insert_batch(
         Ok(table) => {
             let mut builder = table.merge_insert(&["kunnr"]);
             builder.when_not_matched_insert_all();
-            builder
-                .execute(Box::new(batches))
-                .await
-                .map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
+            builder.execute(Box::new(batches)).await?;
         }
         Err(_) => {
-            db.create_table("customers", batches)
-                .execute()
-                .await
-                .map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
+            db.create_table("customers", batches).execute().await?;
         }
     }
     Ok(())
 }
 
-fn validate_sql_is_safe(query: &str) -> Result<(), Box<dyn Error>> {
+fn validate_sql_is_safe(query: &str) -> Result<()> {
     let dialect = GenericDialect {};
     let ast = Parser::parse_sql(&dialect, query)
-        .map_err(|e| format!("Failed to parse SQL: {}", e))?;
+        .map_err(|e| anyhow!("Failed to parse SQL: {}", e))?;
 
     if ast.is_empty() {
-        return Err("No SQL statements found.".into());
+        bail!("No SQL statements found.");
     }
 
     if ast.len() > 1 {
-        return Err("SECURITY VIOLATION: Multiple SQL statements detected. Only a single query is allowed.".into());
+        bail!("SECURITY VIOLATION: Multiple SQL statements detected. Only a single query is allowed.");
     }
 
     match &ast[0] {
         Statement::Query(_) => Ok(()),
-        _ => Err("SECURITY VIOLATION: Only pure SELECT queries are permitted in automated systems.".into()),
+        _ => bail!("SECURITY VIOLATION: Only pure SELECT queries are permitted in automated systems."),
     }
 }
 
-pub async fn execute_sql_query(query: &str) -> Result<(), Box<dyn Error>> {
+pub async fn execute_sql_query(query: &str) -> Result<()> {
     info!("Validating SQL query safety via AST parser...");
     validate_sql_is_safe(query)?;
 
@@ -121,11 +114,11 @@ pub async fn execute_sql_query(query: &str) -> Result<(), Box<dyn Error>> {
 async fn extract_chunks_from_stream(
     mut stream: lancedb::arrow::SendableRecordBatchStream,
     retrieved_chunks: &mut std::collections::HashMap<String, String>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<()> {
     use futures::StreamExt;
     
     while let Some(result) = stream.next().await {
-        let batch = result.map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
+        let batch = result?;
 
         let name_arr = batch.column_by_name("name").and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>());
         let city_arr = batch.column_by_name("city").and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>());
@@ -153,21 +146,21 @@ async fn extract_chunks_from_stream(
 pub async fn execute_semantic_search(
     query: &str,
     filters: &[String],
-    model: &candle_transformers::models::bert::BertModel,
-    tokenizer: &tokenizers::Tokenizer,
-) -> Result<std::collections::HashMap<String, String>, Box<dyn Error>> {
+    model: Arc<candle_transformers::models::bert::BertModel>,
+    tokenizer: Arc<tokenizers::Tokenizer>,
+) -> Result<std::collections::HashMap<String, String>> {
     info!("Embedding search query...");
-    let embeddings = get_embeddings(&[query.to_string()], &tokenizer, &model)?;
-    let query_vector = embeddings.into_iter().next().ok_or("Failed to generate embedding")?;
+    let embeddings = get_embeddings(vec![query.to_string()], tokenizer, model).await?;
+    let query_vector = embeddings.into_iter().next().ok_or_else(|| anyhow!("Failed to generate embedding"))?;
 
     info!("Connecting to LanceDB...");
-    let db = lancedb::connect("data/sap_vectors").execute().await.map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
-    let table = db.open_table("customers").execute().await.map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
+    let db = lancedb::connect("data/sap_vectors").execute().await?;
+    let table = db.open_table("customers").execute().await?;
 
     let mut retrieved_chunks = std::collections::HashMap::new();
 
     info!("Executing semantic search (Fuzzy Pass)...");
-    let vector_stream = table.query().nearest_to(query_vector).unwrap().limit(5).execute().await.map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
+    let vector_stream = table.query().nearest_to(query_vector).unwrap().limit(5).execute().await?;
     extract_chunks_from_stream(vector_stream, &mut retrieved_chunks).await?;
 
     info!("Executing exact keyword search (Deterministic Pass)...");
@@ -181,7 +174,7 @@ pub async fn execute_semantic_search(
         } else {
             // Deterministically retrieve exactly matching chunks
             let sql = format!("sentence LIKE '%{}%'", term);
-            let exact_stream = table.query().only_if(sql).limit(5).execute().await.map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
+            let exact_stream = table.query().only_if(sql).limit(5).execute().await?;
             extract_chunks_from_stream(exact_stream, &mut retrieved_chunks).await?;
         }
     }
@@ -191,11 +184,11 @@ pub async fn execute_semantic_search(
 
 pub async fn execute_fallback_search(
     intent: &str,
-) -> Result<std::collections::HashMap<String, String>, Box<dyn Error>> {
+) -> Result<std::collections::HashMap<String, String>> {
     info!("Vector search failed. Executing deterministic fallback search (Absence Proof) for: {}", intent);
     
-    let db = lancedb::connect("data/sap_vectors").execute().await.map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
-    let table = db.open_table("customers").execute().await.map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
+    let db = lancedb::connect("data/sap_vectors").execute().await?;
+    let table = db.open_table("customers").execute().await?;
 
     let mut retrieved_chunks = std::collections::HashMap::new();
 
@@ -214,8 +207,7 @@ pub async fn execute_fallback_search(
         .only_if(sql)
         .limit(5)
         .execute()
-        .await
-        .map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
+        .await?;
         
     extract_chunks_from_stream(exact_stream, &mut retrieved_chunks).await?;
 

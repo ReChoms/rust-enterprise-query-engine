@@ -1,13 +1,14 @@
 use candle_core::{Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config};
-use std::error::Error;
+use anyhow::Result;
 use std::fs::File;
 use std::path::Path;
+use std::sync::Arc;
 use tokenizers::Tokenizer;
 use tracing::info;
 
-fn download_file(url: &str, dest: &str) -> Result<String, Box<dyn Error>> {
+fn download_file(url: &str, dest: &str) -> Result<String> {
     if !Path::new(dest).exists() {
         info!("Downloading {}...", dest);
         let resp = ureq::get(url).call()?;
@@ -17,7 +18,7 @@ fn download_file(url: &str, dest: &str) -> Result<String, Box<dyn Error>> {
     Ok(dest.to_string())
 }
 
-pub fn load_model() -> Result<(BertModel, Tokenizer), Box<dyn Error>> {
+pub fn load_model() -> Result<(Arc<BertModel>, Arc<Tokenizer>)> {
     info!("Fetching safetensors and config...");
 
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -44,7 +45,7 @@ pub fn load_model() -> Result<(BertModel, Tokenizer), Box<dyn Error>> {
     let config: Config = serde_json::from_str(&config)?;
 
     let mut tokenizer =
-        Tokenizer::from_file(tokenizer_path).map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
+        Tokenizer::from_file(tokenizer_path).map_err(anyhow::Error::msg)?;
 
     tokenizer.with_padding(Some(tokenizers::PaddingParams {
         strategy: tokenizers::PaddingStrategy::BatchLongest,
@@ -57,7 +58,7 @@ pub fn load_model() -> Result<(BertModel, Tokenizer), Box<dyn Error>> {
 
     let model = BertModel::load(vb, &config)?;
 
-    Ok((model, tokenizer))
+    Ok((Arc::new(model), Arc::new(tokenizer)))
 }
 
 fn normalize_vector(mut vec: Vec<f32>) -> Vec<f32> {
@@ -68,29 +69,34 @@ fn normalize_vector(mut vec: Vec<f32>) -> Vec<f32> {
     vec
 }
 
-pub fn get_embeddings(
-    sentences: &[String],
-    tokenizer: &Tokenizer,
-    model: &BertModel,
-) -> Result<Vec<Vec<f32>>, Box<dyn Error>> {
-    let inputs: Vec<&str> = sentences.iter().map(|s| s.as_str()).collect();
-    let tokens = tokenizer
-        .encode_batch(inputs, true)
-        .map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
+pub async fn get_embeddings(
+    sentences: Vec<String>,
+    tokenizer: Arc<Tokenizer>,
+    model: Arc<BertModel>,
+) -> Result<Vec<Vec<f32>>> {
+    let result = tokio::task::spawn_blocking(move || -> Result<Vec<Vec<f32>>> {
+        let inputs: Vec<&str> = sentences.iter().map(|s| s.as_str()).collect();
+        let tokens = tokenizer
+            .encode_batch(inputs, true)
+            .map_err(anyhow::Error::msg)?;
 
-    let token_ids = tokens
-        .iter()
-        .map(|t| Tensor::new(t.get_ids(), &Device::Cpu))
-        .collect::<Result<Vec<_>, _>>()?;
-    let token_ids = Tensor::stack(&token_ids, 0)?;
+        let token_ids = tokens
+            .iter()
+            .map(|t| Tensor::new(t.get_ids(), &Device::Cpu))
+            .collect::<Result<Vec<_>, _>>()?;
+        let token_ids = Tensor::stack(&token_ids, 0)?;
 
-    let token_type_ids = token_ids.zeros_like()?;
-    let embeddings = model.forward(&token_ids, &token_type_ids, None)?;
+        let token_type_ids = token_ids.zeros_like()?;
+        let embeddings = model.forward(&token_ids, &token_type_ids, None)?;
 
-    let cls_embeddings = embeddings.i((.., 0, ..))?;
+        let cls_embeddings = embeddings.i((.., 0, ..))?;
 
-    let raw_vecs = cls_embeddings.to_vec2::<f32>()?;
-    let normalized_vecs = raw_vecs.into_iter().map(normalize_vector).collect();
+        let raw_vecs = cls_embeddings.to_vec2::<f32>()?;
+        let normalized_vecs = raw_vecs.into_iter().map(normalize_vector).collect();
 
-    Ok(normalized_vecs)
+        Ok(normalized_vecs)
+    })
+    .await??;
+
+    Ok(result)
 }

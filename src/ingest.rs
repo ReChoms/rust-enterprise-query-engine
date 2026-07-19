@@ -2,7 +2,7 @@ use arrow_array::Array;
 use arrow_schema::{DataType, Field, Schema};
 use lancedb::query::{ExecutableQuery, QueryBase};
 use std::collections::HashSet;
-use std::error::Error;
+use anyhow::{anyhow, Result};
 use std::fs::File;
 use std::sync::Arc;
 use tracing::info;
@@ -16,16 +16,15 @@ pub async fn execute_ingestion(
     csv_path: &str,
     overwrite: bool,
     batch_size: usize,
-    model: &candle_transformers::models::bert::BertModel,
-    tokenizer: &tokenizers::Tokenizer,
-) -> Result<(), Box<dyn Error>> {
+    model: Arc<candle_transformers::models::bert::BertModel>,
+    tokenizer: Arc<tokenizers::Tokenizer>,
+) -> Result<()> {
     info!(">>> Executing INGEST command on file: {}", csv_path);
 
     info!("Connecting to LanceDB...");
     let db = lancedb::connect("data/sap_vectors")
         .execute()
-        .await
-        .map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
+        .await?;
 
     if overwrite {
         info!("Overwrite flag detected. Dropping existing 'customers' table...");
@@ -36,10 +35,10 @@ pub async fn execute_ingestion(
 
     info!("Reading {} with dynamic chunk size {}...", csv_path, batch_size);
     let file_stream = File::open(csv_path)
-        .map_err(|e| format!("File load went wrong. Rust shows the following error: {}", e))?;
+        .map_err(|e| anyhow!("File load went wrong. Rust shows the following error: {}", e))?;
     let mut rdr = csv::Reader::from_reader(file_stream);
 
-    process_csv_in_batches(&mut rdr, &db, schema, &model, &tokenizer, batch_size).await?;
+    process_csv_in_batches(&mut rdr, &db, schema, model, tokenizer, batch_size).await?;
 
     Ok(())
 }
@@ -71,23 +70,23 @@ async fn process_csv_in_batches(
     rdr: &mut csv::Reader<File>,
     db: &lancedb::Connection,
     schema: Arc<Schema>,
-    model: &candle_transformers::models::bert::BertModel,
-    tokenizer: &tokenizers::Tokenizer,
+    model: Arc<candle_transformers::models::bert::BertModel>,
+    tokenizer: Arc<tokenizers::Tokenizer>,
     batch_size: usize,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<()> {
     let mut batch_records: Vec<Kna1Row> = Vec::new();
     let mut total_inserted = 0;
 
     for result in rdr.deserialize() {
         batch_records.push(result?);
         if batch_records.len() >= batch_size {
-            total_inserted += process_current_batch(db, schema.clone(), model, tokenizer, &batch_records).await?;
+            total_inserted += process_current_batch(db, schema.clone(), Arc::clone(&model), Arc::clone(&tokenizer), &batch_records).await?;
             batch_records.clear();
         }
     }
 
     if !batch_records.is_empty() {
-        total_inserted += process_current_batch(db, schema.clone(), model, tokenizer, &batch_records).await?;
+        total_inserted += process_current_batch(db, schema.clone(), Arc::clone(&model), Arc::clone(&tokenizer), &batch_records).await?;
     }
 
     info!("Successfully ingested {} total new records into LanceDB 'customers' table!", total_inserted);
@@ -123,10 +122,10 @@ async fn find_existing_in_db(db: &lancedb::Connection, ids_for_sql: &[String]) -
 async fn process_current_batch(
     db: &lancedb::Connection,
     schema: Arc<Schema>,
-    model: &candle_transformers::models::bert::BertModel,
-    tokenizer: &tokenizers::Tokenizer,
+    model: Arc<candle_transformers::models::bert::BertModel>,
+    tokenizer: Arc<tokenizers::Tokenizer>,
     batch_records: &[Kna1Row],
-) -> Result<usize, Box<dyn Error>> {
+) -> Result<usize> {
     let mut ids_for_sql = Vec::new();
     for row in batch_records {
         if let Some(k) = &row.kunnr { ids_for_sql.push(format!("'{}'", k)); }
@@ -152,7 +151,7 @@ async fn process_current_batch(
 
     if documents.is_empty() { return Ok(0); }
 
-    let embeddings = get_embeddings(&documents, tokenizer, model)?;
+    let embeddings = get_embeddings(documents.clone(), tokenizer, model).await?;
     insert_batch(db, schema, &records, &documents, embeddings).await?;
 
     Ok(documents.len())

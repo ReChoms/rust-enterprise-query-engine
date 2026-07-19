@@ -10,7 +10,8 @@ mod models;
 mod tests;
 
 use clap::Parser;
-use std::error::Error;
+use anyhow::Result;
+use std::sync::Arc;
 use tracing::info;
 
 use crate::cli::{Cli, Commands};
@@ -21,7 +22,7 @@ use crate::llm::{ask_llm, build_question_parser_prompt, build_routing_prompt, bu
 use crate::models::{ParsedQuestion, RouterDecision, SqlResponse};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> Result<()> {
     debug::init_logger();
 
     let cli = Cli::parse();
@@ -30,7 +31,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::Ingest { file, overwrite, batch_size } => {
             info!("Loading embedding model (BAAI/bge-base-en-v1.5)...");
             let (model, tokenizer) = load_model()?;
-            execute_ingestion(file, *overwrite, *batch_size, &model, &tokenizer).await?;
+            execute_ingestion(file, *overwrite, *batch_size, Arc::clone(&model), Arc::clone(&tokenizer)).await?;
         }
         Commands::AskSemantic { query } => {
             info!(">>> Executing ASK-SEMANTIC command");
@@ -45,7 +46,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             
             // CRITICAL FIX: We execute the vector math strictly on the `intent`, 
             // and pass `filters` for the exact SQL string match.
-            let chunks = execute_semantic_search(&parsed_query.intent, &parsed_query.filters, &model, &tokenizer).await?;
+            let chunks = execute_semantic_search(&parsed_query.intent, &parsed_query.filters, Arc::clone(&model), Arc::clone(&tokenizer)).await?;
             
             info!("Passing retrieved chunks to LLM for deterministic generation...");
             // We still pass the original full `query` to the final answering LLM so it knows 
@@ -88,7 +89,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let (model, tokenizer) = load_model()?;
                 
                 // Pass parsed intent and exact filters instead of raw query
-                let chunks = execute_semantic_search(&parsed_query.intent, &parsed_query.filters, &model, &tokenizer).await?;
+                let chunks = execute_semantic_search(&parsed_query.intent, &parsed_query.filters, Arc::clone(&model), Arc::clone(&tokenizer)).await?;
                 
                 info!("Passing retrieved chunks to LLM for deterministic generation...");
                 let semantic_prompt = build_semantic_prompt(&query, &chunks);
