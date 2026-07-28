@@ -99,3 +99,30 @@ pub async fn get_embeddings(
 
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_unit_vector() {
+        // A classic 3-4-5 triangle vector
+        let vec = vec![3.0, 4.0];
+        let normalized = normalize_vector(vec);
+        
+        // Magnitude is 5. Normalized should be 3/5 (0.6) and 4/5 (0.8)
+        assert_eq!(normalized, vec![0.6, 0.8]);
+        
+        // Ensure new magnitude is precisely 1.0 (with float tolerance)
+        let new_mag = normalized.iter().map(|&x| x * x).sum::<f32>().sqrt();
+        assert!((new_mag - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_normalize_zero_vector() {
+        let vec = vec![0.0, 0.0, 0.0];
+        let normalized = normalize_vector(vec);
+        // Should bypass division entirely and safely return the 0 vector
+        assert_eq!(normalized, vec![0.0, 0.0, 0.0]);
+    }
+}

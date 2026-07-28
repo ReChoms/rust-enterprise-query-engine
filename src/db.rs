@@ -93,19 +93,23 @@ fn validate_sql_is_safe(query: &str) -> Result<()> {
     }
 }
 
-pub async fn execute_sql_query(query: &str) -> Result<()> {
+pub async fn init_datafusion() -> Result<SessionContext> {
+    info!("Spinning up Apache DataFusion Engine (Zero-Copy)...");
+    let sql_engine = SessionContext::new();
+
+    info!("Registering data/kna1.csv as virtual SQL table...");
+    sql_engine.register_csv("kna1", "data/kna1.csv", CsvReadOptions::new())
+        .await?;
+
+    Ok(sql_engine)
+}
+
+pub async fn execute_sql_query(sql_engine: &SessionContext, query: &str) -> Result<()> {
     info!("Validating SQL query safety via AST parser...");
     validate_sql_is_safe(query)?;
 
-    info!("Spinning up Apache DataFusion Engine (Zero-Copy)...");
-    let ctx = SessionContext::new();
-
-    info!("Registering data/kna1.csv as virtual SQL table...");
-    ctx.register_csv("kna1", "data/kna1.csv", CsvReadOptions::new())
-        .await?;
-
     info!("Executing SQL: {}", query);
-    let df = ctx.sql(query).await?;
+    let df = sql_engine.sql(query).await?;
     df.show().await?;
 
     Ok(())
@@ -113,7 +117,7 @@ pub async fn execute_sql_query(query: &str) -> Result<()> {
 
 async fn extract_chunks_from_stream(
     mut stream: lancedb::arrow::SendableRecordBatchStream,
-    retrieved_chunks: &mut std::collections::HashMap<String, String>,
+    retrieved_chunks: &mut std::collections::HashMap<String, std::sync::Arc<str>>,
 ) -> Result<()> {
     use futures::StreamExt;
     
@@ -136,7 +140,7 @@ async fn extract_chunks_from_stream(
                     "name": name,
                     "city": city
                 }).to_string();
-                retrieved_chunks.insert(kunnr, chunk_json);
+                retrieved_chunks.insert(kunnr, std::sync::Arc::from(chunk_json));
             }
         }
     }
@@ -149,7 +153,7 @@ pub async fn execute_semantic_search(
     filters: &[String],
     model: Arc<candle_transformers::models::bert::BertModel>,
     tokenizer: Arc<tokenizers::Tokenizer>,
-) -> Result<std::collections::HashMap<String, String>> {
+) -> Result<std::collections::HashMap<String, std::sync::Arc<str>>> {
     info!("Embedding search query...");
     let embeddings = get_embeddings(vec![query.to_string()], tokenizer, model).await?;
     let query_vector = embeddings.into_iter().next().ok_or_else(|| anyhow!("Failed to generate embedding"))?;
@@ -183,27 +187,34 @@ pub async fn execute_semantic_search(
     Ok(retrieved_chunks)
 }
 
+pub fn build_fallback_sql(intent: &str) -> String {
+    let mut conditions = Vec::new();
+    
+    for word in intent.split_whitespace() {
+        // Standard SQL escaping: double up single quotes to prevent string literal breakout
+        let escaped_word = word.replace("'", "''");
+        conditions.push(format!("sentence LIKE '%{}%'", escaped_word));
+    }
+    
+    if conditions.is_empty() {
+        return "1=0".to_string(); // Fail-safe for empty inputs prevents syntax errors
+    }
+    
+    conditions.join(" AND ")
+}
+
 pub async fn execute_fallback_search(
     intent: &str,
     db_uri: &str,
-) -> Result<std::collections::HashMap<String, String>> {
+) -> Result<std::collections::HashMap<String, std::sync::Arc<str>>> {
     info!("Vector search failed. Executing deterministic fallback search (Absence Proof) for: {}", intent);
     
     let db = lancedb::connect(db_uri).execute().await?;
     let table = db.open_table("customers").execute().await?;
 
     let mut retrieved_chunks = std::collections::HashMap::new();
-
-    // Sanitize to prevent SQL injection or parser crashes on quotes
-    let sanitized_intent = intent.replace("'", "");
     
-    // Dynamically build a robust AND query for each individual word
-    let conditions: Vec<String> = sanitized_intent
-        .split_whitespace()
-        .map(|word| format!("sentence LIKE '%{}%'", word))
-        .collect();
-    
-    let sql = conditions.join(" AND ");
+    let sql = build_fallback_sql(intent);
     
     let exact_stream = table.query()
         .only_if(sql)
@@ -214,4 +225,107 @@ pub async fn execute_fallback_search(
     extract_chunks_from_stream(exact_stream, &mut retrieved_chunks).await?;
 
     Ok(retrieved_chunks)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_valid_select_passes() {
+        assert!(validate_sql_is_safe("SELECT * FROM kna1 WHERE ort01 = 'Berlin'").is_ok());
+    }
+
+    #[test]
+    fn test_drop_table_blocked() {
+        let result = validate_sql_is_safe("DROP TABLE kna1");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("SECURITY VIOLATION"));
+    }
+
+    #[test]
+    fn test_multi_statement_blocked() {
+        let result = validate_sql_is_safe("SELECT 1; DROP TABLE kna1;");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Multiple SQL statements detected"));
+    }
+
+    #[test]
+    fn test_insert_blocked() {
+        let result = validate_sql_is_safe("INSERT INTO kna1 VALUES ('1000')");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("pure SELECT queries are permitted"));
+    }
+
+    #[test]
+    fn test_fallback_sql_sanitization() {
+        let intent = "find customer 'O'Connor'";
+        let sql = build_fallback_sql(intent);
+        // Should safely escape single quotes by doubling them, preserving data integrity
+        assert_eq!(sql, "sentence LIKE '%find%' AND sentence LIKE '%customer%' AND sentence LIKE '%''O''Connor''%'");
+    }
+
+    // --- GOLDEN TESTS: ADVANCED ANALYTICS (MUST PASS) ---
+
+    #[test]
+    fn test_golden_heavy_aggregation() {
+        assert!(validate_sql_is_safe("SELECT land1, sum(length(name1)), count(*) FROM kna1 GROUP BY land1 HAVING count(*) > 5 ORDER BY land1 DESC LIMIT 5 OFFSET 10").is_ok());
+    }
+
+    #[test]
+    fn test_golden_cte_with_clause() {
+        assert!(validate_sql_is_safe("WITH regional_counts AS (SELECT ort01, count(*) as c FROM kna1 GROUP BY ort01) SELECT * FROM regional_counts WHERE c > 10").is_ok());
+    }
+
+    #[test]
+    fn test_golden_window_function() {
+        assert!(validate_sql_is_safe("SELECT kunnr, name1, row_number() OVER (PARTITION BY land1 ORDER BY kunnr) as rank FROM kna1").is_ok());
+    }
+
+    #[test]
+    fn test_golden_complex_self_join() {
+        assert!(validate_sql_is_safe("SELECT a.kunnr, b.name1 FROM kna1 a INNER JOIN kna1 b ON a.ort01 = b.ort01 WHERE a.kunnr != b.kunnr").is_ok());
+    }
+
+    #[test]
+    fn test_golden_casting_and_coalesce() {
+        assert!(validate_sql_is_safe("SELECT coalesce(kunnr, 'UNKNOWN'), cast(length(name1) as INT) FROM kna1 WHERE ort01 IS NOT NULL").is_ok());
+    }
+
+    // --- GOLDEN TESTS: ADVERSARIAL ATTACKS (MUST FAIL) ---
+
+    #[test]
+    fn test_golden_attack_truncate() {
+        let result = validate_sql_is_safe("TRUNCATE TABLE kna1;");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("SECURITY VIOLATION"));
+    }
+
+    #[test]
+    fn test_golden_attack_alter_schema() {
+        let result = validate_sql_is_safe("ALTER TABLE kna1 ADD COLUMN secret VARCHAR(255);");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("SECURITY VIOLATION"));
+    }
+
+    #[test]
+    fn test_golden_attack_exfiltration_copy() {
+        let result = validate_sql_is_safe("COPY kna1 TO '/tmp/kna1_stolen.csv';");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("SECURITY VIOLATION"));
+    }
+
+    #[test]
+    fn test_golden_attack_transaction_block() {
+        let result = validate_sql_is_safe("BEGIN TRANSACTION; DROP TABLE kna1; COMMIT;");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Multiple SQL statements"));
+    }
+
+    #[test]
+    fn test_golden_attack_comment_obfuscated_injection() {
+        let result = validate_sql_is_safe("SELECT * FROM kna1; /* bypass filter */ DROP TABLE kna1;");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Multiple SQL statements"));
+    }
 }

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use tracing::info;
 
 use crate::cli::{Cli, Commands};
-use crate::db::{execute_fallback_search, execute_semantic_search, execute_sql_query};
+use crate::db::{execute_fallback_search, execute_semantic_search, execute_sql_query, init_datafusion};
 use crate::embeddings::load_model;
 use crate::ingest::execute_ingestion;
 use crate::llm::{ask_llm, build_question_parser_prompt, build_routing_prompt, build_sql_prompt, build_semantic_prompt, verify_and_parse_llm_generation, parse_llm_json};
@@ -78,7 +78,8 @@ async fn main() -> Result<()> {
             let decision: RouterDecision = serde_json::from_str(&raw_json)?;
 
             if decision.route == "SQL" {
-                execute_sql_query(&decision.query).await?;
+                let sql_engine = init_datafusion().await?;
+                execute_sql_query(&sql_engine, &decision.query).await?;
             } else {
                 info!("Parsing raw query to separate semantic intent from exact filters...");
                 let parser_prompt = build_question_parser_prompt(&query);
@@ -115,7 +116,8 @@ async fn main() -> Result<()> {
         }
         Commands::AskSql { query } => {
             info!(">>> Executing ASK-SQL command");
-            execute_sql_query(&query).await?;
+            let sql_engine = init_datafusion().await?;
+            execute_sql_query(&sql_engine, &query).await?;
         }
         Commands::AskAiSql { query } => {
             info!(">>> Executing ASK-AISQL command");
@@ -123,7 +125,8 @@ async fn main() -> Result<()> {
 
             let raw_json = ask_llm(&full_prompt).await?;
             let response: SqlResponse = parse_llm_json(&raw_json)?;
-            execute_sql_query(&response.query).await?;
+            let sql_engine = init_datafusion().await?;
+            execute_sql_query(&sql_engine, &response.query).await?;
         }
     }
 

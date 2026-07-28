@@ -49,15 +49,21 @@ pub fn build_sql_prompt(user_question: &str) -> String {
 /// Strips hallucinated markdown wrappers from LLM outputs and safely parses 
 /// the remaining JSON into any strongly typed Rust struct.
 pub fn parse_llm_json<T: DeserializeOwned>(raw_output: &str) -> Result<T> {
-    let clean_json = raw_output
-        .trim()
-        .strip_prefix("```json")
-        .unwrap_or(raw_output.trim())
-        .strip_prefix("```")
-        .unwrap_or(raw_output.trim())
-        .strip_suffix("```")
-        .unwrap_or(raw_output.trim())
-        .trim();
+    let mut clean_json = raw_output.trim();
+
+    if clean_json.starts_with("```json") {
+        clean_json = clean_json.strip_prefix("```json").unwrap();
+    } else if clean_json.starts_with("```") {
+        clean_json = clean_json.strip_prefix("```").unwrap();
+    }
+
+    clean_json = clean_json.trim();
+
+    if clean_json.ends_with("```") {
+        clean_json = clean_json.strip_suffix("```").unwrap();
+    }
+
+    clean_json = clean_json.trim();
 
     serde_json::from_str(clean_json)
         .map_err(|e| anyhow!("Failed to parse JSON: {}. Raw text: {}", e, clean_json))
@@ -65,7 +71,7 @@ pub fn parse_llm_json<T: DeserializeOwned>(raw_output: &str) -> Result<T> {
 
 pub fn verify_and_parse_llm_generation(
     raw_output: &str,
-    retrieved_chunks: &HashMap<String, String>,
+    retrieved_chunks: &HashMap<String, std::sync::Arc<str>>,
 ) -> Result<SemanticResponse> {
     let response: SemanticResponse = parse_llm_json(raw_output)?;
 
@@ -88,7 +94,7 @@ pub fn verify_and_parse_llm_generation(
     Ok(response)
 }
 
-pub fn build_semantic_prompt(user_question: &str, chunks: &HashMap<String, String>) -> String {
+pub fn build_semantic_prompt(user_question: &str, chunks: &HashMap<String, std::sync::Arc<str>>) -> String {
     let mut context = String::new();
     for (id, text) in chunks {
         context.push_str(&format!("CHUNK ID: {}\nTEXT: {}\n\n", id, text));
@@ -142,4 +148,103 @@ pub fn build_question_parser_prompt(user_question: &str) -> String {
         User Question: \"{}\"\nA: ",
         user_question
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    #[test]
+    fn test_parse_clean_json() {
+        let raw = r#"{"route": "SQL", "query": "SELECT * FROM kna1"}"#;
+        let parsed: Value = parse_llm_json(raw).unwrap();
+        assert_eq!(parsed["route"], "SQL");
+    }
+
+    #[test]
+    fn test_parse_markdown_wrapped_json() {
+        let raw = "```json\n{\"route\": \"SQL\", \"query\": \"\"}\n```";
+        let parsed: Value = parse_llm_json(raw).unwrap();
+        assert_eq!(parsed["route"], "SQL");
+    }
+
+    #[test]
+    fn test_parse_triple_backtick_json() {
+        let raw = "```\n{\"route\": \"SEMANTIC\", \"query\": \"\"}\n```";
+        let parsed: Value = parse_llm_json(raw).unwrap();
+        assert_eq!(parsed["route"], "SEMANTIC");
+    }
+
+    #[test]
+    fn test_parse_garbage_fails() {
+        let raw = "This is just conversational text.";
+        let parsed: Result<Value> = parse_llm_json(raw);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn test_verify_valid_generation() {
+        let mut chunks = HashMap::new();
+        chunks.insert("chunk_1".to_string(), std::sync::Arc::from("The customer is Acme Corp in Berlin."));
+        
+        let raw = r#"{
+            "answer_found": true,
+            "answer": "The customer is Acme Corp.",
+            "exact_quote": "Acme Corp in Berlin",
+            "source_chunk_id": "chunk_1"
+        }"#;
+
+        let result = verify_and_parse_llm_generation(raw, &chunks);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_hallucinated_quote_blocked() {
+        let mut chunks = HashMap::new();
+        chunks.insert("chunk_1".to_string(), std::sync::Arc::from("The customer is Acme Corp in Berlin."));
+        
+        let raw = r#"{
+            "answer_found": true,
+            "answer": "The customer is in Munich.",
+            "exact_quote": "Acme Corp in Munich",
+            "source_chunk_id": "chunk_1"
+        }"#;
+
+        let result = verify_and_parse_llm_generation(raw, &chunks);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Hallucination detected"));
+    }
+
+    #[test]
+    fn test_verify_fake_chunk_id_blocked() {
+        let mut chunks = HashMap::new();
+        chunks.insert("chunk_1".to_string(), std::sync::Arc::from("The customer is Acme Corp in Berlin."));
+        
+        let raw = r#"{
+            "answer_found": true,
+            "answer": "The customer is Acme Corp.",
+            "exact_quote": "Acme Corp",
+            "source_chunk_id": "chunk_999"
+        }"#;
+
+        let result = verify_and_parse_llm_generation(raw, &chunks);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("non-existent chunk ID"));
+    }
+
+    #[test]
+    fn test_verify_answer_not_found_passes() {
+        let chunks = HashMap::new();
+        
+        let raw = r#"{
+            "answer_found": false,
+            "answer": "",
+            "exact_quote": "",
+            "source_chunk_id": ""
+        }"#;
+
+        let result = verify_and_parse_llm_generation(raw, &chunks);
+        assert!(result.is_ok());
+    }
 }
