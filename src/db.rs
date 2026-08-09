@@ -14,7 +14,7 @@ use tracing::info;
 use crate::embeddings::get_embeddings;
 
 pub async fn insert_batch(
-    db: &lancedb::Connection,
+    vector_db: &lancedb::Connection,
     schema: Arc<Schema>,
     records: &[(String, String, String)],
     documents: &[String],
@@ -61,14 +61,14 @@ pub async fn insert_batch(
 
     let batches = RecordBatchIterator::new(vec![Ok(batch)], schema.clone());
 
-    match db.open_table("customers").execute().await {
-        Ok(table) => {
-            let mut builder = table.merge_insert(&["kunnr"]);
+    match vector_db.open_table("customers").execute().await {
+        Ok(target_table) => {
+            let mut builder = target_table.merge_insert(&["kunnr"]);
             builder.when_not_matched_insert_all();
             builder.execute(Box::new(batches)).await?;
         }
         Err(_) => {
-            db.create_table("customers", batches).execute().await?;
+            vector_db.create_table("customers", batches).execute().await?;
         }
     }
     Ok(())
@@ -159,13 +159,13 @@ pub async fn execute_semantic_search(
     let query_vector = embeddings.into_iter().next().ok_or_else(|| anyhow!("Failed to generate embedding"))?;
 
     info!("Connecting to LanceDB...");
-    let db = lancedb::connect(db_uri).execute().await?;
-    let table = db.open_table("customers").execute().await?;
+    let vector_db = lancedb::connect(db_uri).execute().await?;
+    let target_table = vector_db.open_table("customers").execute().await?;
 
     let mut retrieved_chunks = std::collections::HashMap::new();
 
     info!("Executing semantic search (Fuzzy Pass)...");
-    let vector_stream = table.query().nearest_to(query_vector).unwrap().limit(5).execute().await?;
+    let vector_stream = target_table.query().nearest_to(query_vector).unwrap().limit(5).execute().await?;
     extract_chunks_from_stream(vector_stream, &mut retrieved_chunks).await?;
 
     info!("Executing exact keyword search (Deterministic Pass)...");
@@ -179,7 +179,7 @@ pub async fn execute_semantic_search(
         } else {
             // Deterministically retrieve exactly matching chunks
             let sql = format!("sentence LIKE '%{}%'", term);
-            let exact_stream = table.query().only_if(sql).limit(5).execute().await?;
+            let exact_stream = target_table.query().only_if(sql).limit(5).execute().await?;
             extract_chunks_from_stream(exact_stream, &mut retrieved_chunks).await?;
         }
     }
@@ -209,14 +209,14 @@ pub async fn execute_fallback_search(
 ) -> Result<std::collections::HashMap<String, std::sync::Arc<str>>> {
     info!("Vector search failed. Executing deterministic fallback search (Absence Proof) for: {}", intent);
     
-    let db = lancedb::connect(db_uri).execute().await?;
-    let table = db.open_table("customers").execute().await?;
+    let vector_db = lancedb::connect(db_uri).execute().await?;
+    let target_table = vector_db.open_table("customers").execute().await?;
 
     let mut retrieved_chunks = std::collections::HashMap::new();
     
     let sql = build_fallback_sql(intent);
     
-    let exact_stream = table.query()
+    let exact_stream = target_table.query()
         .only_if(sql)
         .limit(5)
         .execute()

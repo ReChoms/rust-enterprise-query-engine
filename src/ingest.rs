@@ -23,13 +23,13 @@ pub async fn execute_ingestion(
     info!(">>> Executing INGEST command on file: {}", csv_path);
 
     info!("Connecting to LanceDB...");
-    let db = lancedb::connect(db_uri)
+    let vector_db = lancedb::connect(db_uri)
         .execute()
         .await?;
 
     if overwrite {
         info!("Overwrite flag detected. Dropping existing 'customers' table...");
-        let _ = db.drop_table("customers").await;
+        let _ = vector_db.drop_table("customers").await;
     }
 
     let schema = define_schema();
@@ -37,9 +37,9 @@ pub async fn execute_ingestion(
     info!("Reading {} with dynamic chunk size {}...", csv_path, batch_size);
     let file_stream = File::open(csv_path)
         .map_err(|e| anyhow!("File load went wrong. Rust shows the following error: {}", e))?;
-    let mut rdr = csv::Reader::from_reader(file_stream);
+    let mut csv_reader = csv::Reader::from_reader(file_stream);
 
-    process_csv_in_batches(&mut rdr, &db, schema, model, tokenizer, batch_size).await?;
+    process_csv_in_batches(&mut csv_reader, &vector_db, schema, model, tokenizer, batch_size).await?;
 
     Ok(())
 }
@@ -68,8 +68,8 @@ fn define_schema() -> Arc<Schema> {
 
 /// The outer loop that only accumulates raw CSV rows into an array
 async fn process_csv_in_batches(
-    rdr: &mut csv::Reader<File>,
-    db: &lancedb::Connection,
+    csv_reader: &mut csv::Reader<File>,
+    vector_db: &lancedb::Connection,
     schema: Arc<Schema>,
     model: Arc<candle_transformers::models::bert::BertModel>,
     tokenizer: Arc<tokenizers::Tokenizer>,
@@ -78,10 +78,10 @@ async fn process_csv_in_batches(
     let mut batch_records: Vec<Kna1Row> = Vec::new();
     let mut total_inserted = 0;
 
-    for result in rdr.deserialize() {
+    for result in csv_reader.deserialize() {
         batch_records.push(result?);
         if batch_records.len() >= batch_size {
-            total_inserted += process_current_batch(db, schema.clone(), Arc::clone(&model), Arc::clone(&tokenizer), &batch_records).await?;
+            total_inserted += process_current_batch(vector_db, schema.clone(), Arc::clone(&model), Arc::clone(&tokenizer), &batch_records).await?;
             batch_records.clear();
         }
     }
@@ -95,23 +95,21 @@ async fn process_csv_in_batches(
 }
 
 /// Helper function to perform Just-In-Time SQL lookup on a specific batch of IDs
-async fn find_existing_in_db(db: &lancedb::Connection, ids_for_sql: &[String]) -> HashSet<String> {
+async fn find_existing_in_db(vector_db: &lancedb::Connection, ids_for_sql: &[String]) -> HashSet<String> {
     let mut existing = HashSet::new();
     if ids_for_sql.is_empty() { return existing; }
 
-    if let Ok(table) = db.open_table("customers").execute().await {
+    if let Ok(target_table) = vector_db.open_table("customers").execute().await {
         let filter = format!("kunnr IN ({})", ids_for_sql.join(", "));
         use futures::StreamExt;
-        if let Ok(mut stream) = table.query().only_if(filter).execute().await {
-            while let Some(batch) = stream.next().await {
-                if let Ok(batch) = batch {
-                    if let Some(col) = batch.column_by_name("kunnr") {
-                        if let Some(k_arr) = col.as_any().downcast_ref::<arrow_array::StringArray>() {
-                            for i in 0..k_arr.len() {
-                                existing.insert(k_arr.value(i).to_string());
-                            }
-                        }
-                    }
+        if let Ok(mut stream) = target_table.query().only_if(filter).execute().await {
+            while let Some(batch_result) = stream.next().await {
+                let Ok(batch) = batch_result else { continue; };
+                let Some(col) = batch.column_by_name("kunnr") else { continue; };
+                let Some(k_arr) = col.as_any().downcast_ref::<arrow_array::StringArray>() else { continue; };
+                
+                for i in 0..k_arr.len() {
+                    existing.insert(k_arr.value(i).to_string());
                 }
             }
         }
@@ -121,7 +119,7 @@ async fn find_existing_in_db(db: &lancedb::Connection, ids_for_sql: &[String]) -
 
 /// The core logic that filters duplicates and runs the heavy embedding math strictly on the delta
 async fn process_current_batch(
-    db: &lancedb::Connection,
+    vector_db: &lancedb::Connection,
     schema: Arc<Schema>,
     model: Arc<candle_transformers::models::bert::BertModel>,
     tokenizer: Arc<tokenizers::Tokenizer>,
@@ -129,10 +127,12 @@ async fn process_current_batch(
 ) -> Result<usize> {
     let mut ids_for_sql = Vec::new();
     for row in batch_records {
-        if let Some(k) = &row.kunnr { ids_for_sql.push(format!("'{}'", k)); }
+        if let Some(customer_id) = &row.kunnr { 
+            ids_for_sql.push(format!("'{}'", customer_id)); 
+        }
     }
 
-    let existing_in_db = find_existing_in_db(db, &ids_for_sql).await;
+    let existing_in_db = find_existing_in_db(vector_db, &ids_for_sql).await;
     
     let mut documents = Vec::new();
     let mut records = Vec::new();
@@ -153,7 +153,7 @@ async fn process_current_batch(
     if documents.is_empty() { return Ok(0); }
 
     let embeddings = get_embeddings(documents.clone(), tokenizer, model).await?;
-    insert_batch(db, schema, &records, &documents, embeddings).await?;
+    insert_batch(vector_db, schema, &records, &documents, embeddings).await?;
 
     Ok(documents.len())
 }

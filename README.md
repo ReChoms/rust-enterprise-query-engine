@@ -16,14 +16,15 @@ This project was built under strict systems engineering constraints to maximize 
 
 ## Current Roadmap / Pending Optimizations
 
-The system is currently undergoing architectural hardening. The remaining technical milestones include:
+**Status:** The system is currently undergoing a deep-dive **Architectural Code Review**. We are actively mapping out the data flow and hardening the architecture before shipping new features.
 
+The remaining technical milestones and planned future add-ons include:
+
+* **Universal Dynamic Schema:** Ripping out the hardcoded `Kna1Row` structs so the ingestion pipeline can dynamically read the headers of *any* CSV file (MARA, VBAK, etc.) and generate the LanceDB schema on the fly.
+* **REST API Migration via Axum:** Transitioning the tool from a short-lived CLI process to a long-running REST API server, drastically improving performance by holding the massive 400MB HuggingFace model permanently in memory across requests.
+* **LLM Graceful Degradation:** Implementing strict fail-safes so that if the local AI hallucination gate fails or the LLM server crashes, the system automatically falls back to deterministic, mathematically pure vector/SQL searches without breaking the user experience.
 * **Relational Data Extraction:** Transitioning the ingestion pipeline from flat string concatenation to strict JSON schemas to preserve relational boundaries for the LLM.
 * **Deterministic Absence Proofs:** Implementing a fallback corpus scan to mathematically prove a record does not exist when vector top-K searches return empty, preventing false negatives.
-* **Memory & Concurrency Scaling:** 
-  * Refactoring the database deduplication engine from an O(N) memory load to a Just-In-Time O(1) batching process.
-  * Wrapping heavy CPU-bound tensor math in `tokio::task::spawn_blocking` to prevent async executor starvation.
-  * Implementing One-Time Model Loading to eliminate per-query disk I/O latency.
 * **Robustness:** Consolidating networking to the async `reqwest` client, migrating error handling to `anyhow`, and ensuring runtime-relative paths for CI/CD portability.
 
 ## Disclaimer
