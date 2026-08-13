@@ -9,7 +9,7 @@ use tracing::info;
 
 use crate::db::insert_batch;
 use crate::embeddings::get_embeddings;
-use crate::models::Kna1Row;
+use crate::types::Kna1Row;
 
 /// Main entry point for the ingestion pipeline
 pub async fn execute_ingestion(
@@ -87,7 +87,7 @@ async fn process_csv_in_batches(
     }
 
     if !batch_records.is_empty() {
-        total_inserted += process_current_batch(db, schema.clone(), Arc::clone(&model), Arc::clone(&tokenizer), &batch_records).await?;
+        total_inserted += process_current_batch(vector_db, schema.clone(), Arc::clone(&model), Arc::clone(&tokenizer), &batch_records).await?;
     }
 
     info!("Successfully ingested {} total new records into LanceDB 'customers' table!", total_inserted);

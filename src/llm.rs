@@ -1,7 +1,7 @@
-use crate::models::{OllamaRequest, OllamaResponse, SemanticResponse};
-use std::collections::HashMap;
+use crate::types::{OllamaRequest, OllamaResponse, SemanticResponse};
 use anyhow::{anyhow, bail, Result};
 use serde::de::DeserializeOwned;
+use std::collections::HashMap;
 
 const SAP_KNA1_SCHEMA: &str = "\
 Database Schema for table `kna1`:\n\
@@ -18,7 +18,8 @@ pub async fn ask_llm(prompt: &str) -> Result<String> {
         stream: false,
     };
 
-    let host = std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_string());
+    let host =
+        std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_string());
     let url = format!("{}/api/generate", host);
 
     let client = reqwest::Client::new();
@@ -34,7 +35,7 @@ pub async fn ask_llm(prompt: &str) -> Result<String> {
 
 pub fn build_routing_prompt(user_question: &str) -> String {
     format!(
-        "You are an expert SAP data engineer. Read the user's question and decide if it requires exact SQL or SEMANTIC search.\n\n{}\nRULES:\n1. You must ONLY output raw JSON. Do not wrap it in markdown. Do not add conversational text.\n2. The JSON must have two keys: \"route\" (either \"SQL\" or \"SEMANTIC\") and \"query\" (the generated SQL string, or blank).\n\nExamples:\nQ: \"How many customers are in Berlin?\"\nA: {{\"route\": \"SQL\", \"query\": \"SELECT count(*) FROM kna1 WHERE ort01 = 'Berlin'\"}}\n\nQ: \"Show me the names of 5 customers in the US.\"\nA: {{\"route\": \"SQL\", \"query\": \"SELECT name1 FROM kna1 WHERE land1 = 'US' LIMIT 5\"}}\n\nQ: \"Find customers who are large tech manufacturers.\"\nA: {{\"route\": \"SEMANTIC\", \"query\": \"\"}}\n\nUser Question: \"{}\"\nA: ",
+        "You are an expert SAP data engineer. Read the user's question and decide if it requires exact SQL or SEMANTIC search.\n\n{}\nRULES:\n1. You must ONLY output raw JSON. Do not wrap it in markdown. Do not add conversational text.\n2. The JSON must have one key: \"route\" (either \"SQL\" or \"SEMANTIC\").\n\nExamples:\nQ: \"How many customers are in Berlin?\"\nA: {{\"route\": \"SQL\"}}\n\nQ: \"Show me the names of 5 customers in the US.\"\nA: {{\"route\": \"SQL\"}}\n\nQ: \"Find customers who are large tech manufacturers.\"\nA: {{\"route\": \"SEMANTIC\"}}\n\nUser Question: \"{}\"\nA: ",
         SAP_KNA1_SCHEMA, user_question
     )
 }
@@ -46,21 +47,25 @@ pub fn build_sql_prompt(user_question: &str) -> String {
     )
 }
 
-/// Strips hallucinated markdown wrappers from LLM outputs and safely parses 
+/// Strips hallucinated markdown wrappers from LLM outputs and safely parses
 /// the remaining JSON into any strongly typed Rust struct.
 pub fn parse_llm_json<T: DeserializeOwned>(raw_output: &str) -> Result<T> {
     let mut clean_json = raw_output.trim();
 
-    if clean_json.starts_with("```json") {
-        clean_json = clean_json.strip_prefix("```json").unwrap();
-    } else if clean_json.starts_with("```") {
-        clean_json = clean_json.strip_prefix("```").unwrap();
+    if let Some(stripped) = clean_json.strip_prefix("```json\n") {
+        clean_json = stripped;
+    } else if let Some(stripped) = clean_json.strip_prefix("```json") {
+        clean_json = stripped;
+    } else if let Some(stripped) = clean_json.strip_prefix("```\n") {
+        clean_json = stripped;
+    } else if let Some(stripped) = clean_json.strip_prefix("```") {
+        clean_json = stripped;
     }
 
     clean_json = clean_json.trim();
 
-    if clean_json.ends_with("```") {
-        clean_json = clean_json.strip_suffix("```").unwrap();
+    if let Some(stripped) = clean_json.strip_suffix("```") {
+        clean_json = stripped;
     }
 
     clean_json = clean_json.trim();
@@ -76,12 +81,14 @@ pub fn verify_and_parse_llm_generation(
     let response: SemanticResponse = parse_llm_json(raw_output)?;
 
     if response.answer_found {
-        let source_text = retrieved_chunks.get(&response.source_chunk_id).ok_or_else(|| {
-            anyhow!(
-                "SECURITY VIOLATION: LLM cited a non-existent chunk ID: {}",
-                response.source_chunk_id
-            )
-        })?;
+        let source_text = retrieved_chunks
+            .get(&response.source_chunk_id)
+            .ok_or_else(|| {
+                anyhow!(
+                    "SECURITY VIOLATION: LLM cited a non-existent chunk ID: {}",
+                    response.source_chunk_id
+                )
+            })?;
 
         if !source_text.contains(&response.exact_quote) {
             bail!(
@@ -94,12 +101,16 @@ pub fn verify_and_parse_llm_generation(
     Ok(response)
 }
 
-pub fn build_semantic_prompt(user_question: &str, chunks: &HashMap<String, std::sync::Arc<str>>) -> String {
+pub fn build_semantic_prompt(
+    user_question: &str,
+    chunks: &HashMap<String, std::sync::Arc<str>>,
+) -> String {
     let mut context = String::new();
     for (id, text) in chunks {
         context.push_str(&format!("CHUNK ID: {}\nTEXT: {}\n\n", id, text));
     }
-
+    //this prompt is  there to ensure the ai doenst jsut answer but is forced to answer the other
+    //context which increases then accuracy
     format!(
         "You are an expert SAP data engineer. Answer the user's question using ONLY the provided chunks.\n\n\
         CONTEXT:\n{}\n\n\
@@ -120,12 +131,12 @@ pub fn build_semantic_prompt(user_question: &str, chunks: &HashMap<String, std::
 
 /// Resolves Research Area 4 (Raw Query Embedding) by intercepting the user's raw question
 /// before it reaches the tensor embedding pipeline.
-/// 
-/// Why: Dense vector math is excellent at semantic similarity but terrible at 
-/// boolean logic (like "NOT") and heavily over-indexes exact alphanumeric strings. 
-/// If a user asks "NOT KUNNR 1000", passing this directly to LanceDB will likely 
+///
+/// Why: Dense vector math is excellent at semantic similarity but terrible at
+/// boolean logic (like "NOT") and heavily over-indexes exact alphanumeric strings.
+/// If a user asks "NOT KUNNR 1000", passing this directly to LanceDB will likely
 /// retrieve customer 1000 because the vector mathematically aligns with the specific number.
-/// 
+///
 /// This prompt forces a local LLM to parse the query into:
 /// 1. `intent`: The pure semantic meaning (safe for vector math).
 /// 2. `filters`: Explicit IDs and logical exclusions (used later for deterministic Hybrid Search).
@@ -186,8 +197,11 @@ mod tests {
     #[test]
     fn test_verify_valid_generation() {
         let mut chunks = HashMap::new();
-        chunks.insert("chunk_1".to_string(), std::sync::Arc::from("The customer is Acme Corp in Berlin."));
-        
+        chunks.insert(
+            "chunk_1".to_string(),
+            std::sync::Arc::from("The customer is Acme Corp in Berlin."),
+        );
+
         let raw = r#"{
             "answer_found": true,
             "answer": "The customer is Acme Corp.",
@@ -202,8 +216,11 @@ mod tests {
     #[test]
     fn test_verify_hallucinated_quote_blocked() {
         let mut chunks = HashMap::new();
-        chunks.insert("chunk_1".to_string(), std::sync::Arc::from("The customer is Acme Corp in Berlin."));
-        
+        chunks.insert(
+            "chunk_1".to_string(),
+            std::sync::Arc::from("The customer is Acme Corp in Berlin."),
+        );
+
         let raw = r#"{
             "answer_found": true,
             "answer": "The customer is in Munich.",
@@ -213,14 +230,20 @@ mod tests {
 
         let result = verify_and_parse_llm_generation(raw, &chunks);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Hallucination detected"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Hallucination detected"));
     }
 
     #[test]
     fn test_verify_fake_chunk_id_blocked() {
         let mut chunks = HashMap::new();
-        chunks.insert("chunk_1".to_string(), std::sync::Arc::from("The customer is Acme Corp in Berlin."));
-        
+        chunks.insert(
+            "chunk_1".to_string(),
+            std::sync::Arc::from("The customer is Acme Corp in Berlin."),
+        );
+
         let raw = r#"{
             "answer_found": true,
             "answer": "The customer is Acme Corp.",
@@ -230,13 +253,16 @@ mod tests {
 
         let result = verify_and_parse_llm_generation(raw, &chunks);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("non-existent chunk ID"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("non-existent chunk ID"));
     }
 
     #[test]
     fn test_verify_answer_not_found_passes() {
         let chunks = HashMap::new();
-        
+
         let raw = r#"{
             "answer_found": false,
             "answer": "",

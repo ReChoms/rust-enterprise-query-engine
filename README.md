@@ -16,16 +16,16 @@ This project was built under strict systems engineering constraints to maximize 
 
 ## Current Roadmap / Pending Optimizations
 
-**Status:** The system is currently undergoing a deep-dive **Architectural Code Review**. We are actively mapping out the data flow and hardening the architecture before shipping new features.
+**Status:** The system is currently undergoing Phase 3 of the **Architectural Code Review**. The ingestion pipeline, hybrid routing, test coverage, and deterministic absence proofs have been completed.
 
 The remaining technical milestones and planned future add-ons include:
 
+* **LLM Graceful Degradation:** Implementing strict fail-safes so that if the Ollama server is unreachable, the system automatically falls back to deterministic vector/SQL searches without crashing.
 * **Universal Dynamic Schema:** Ripping out the hardcoded `Kna1Row` structs so the ingestion pipeline can dynamically read the headers of *any* CSV file (MARA, VBAK, etc.) and generate the LanceDB schema on the fly.
-* **REST API Migration via Axum:** Transitioning the tool from a short-lived CLI process to a long-running REST API server, drastically improving performance by holding the massive 400MB HuggingFace model permanently in memory across requests.
-* **LLM Graceful Degradation:** Implementing strict fail-safes so that if the local AI hallucination gate fails or the LLM server crashes, the system automatically falls back to deterministic, mathematically pure vector/SQL searches without breaking the user experience.
-* **Relational Data Extraction:** Transitioning the ingestion pipeline from flat string concatenation to strict JSON schemas to preserve relational boundaries for the LLM.
-* **Deterministic Absence Proofs:** Implementing a fallback corpus scan to mathematically prove a record does not exist when vector top-K searches return empty, preventing false negatives.
-* **Robustness:** Consolidating networking to the async `reqwest` client, migrating error handling to `anyhow`, and ensuring runtime-relative paths for CI/CD portability.
+* **Enterprise Cloud Orchestration:** Wrapping the core engine in an Axum REST API, containerizing it with Docker, and deploying it alongside an Ollama sidecar on Kubernetes using PVCs.
+* **Observability & SLO Definition:** Defining latency targets and wiring OpenTelemetry tracing to visualize bottlenecks.
+* **Advanced RAG Architecture:** Implementing two-stage retrieval (Cross-Encoders) and Semantic Caching to eliminate expensive LLM inference for identical queries.
+* **Database Indexing:** Adding IVF-PQ vector indexing and scalar indices to ensure query latency stays microsecond-fast at enterprise scale.
 
 ## Disclaimer
 

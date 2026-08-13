@@ -23,7 +23,6 @@ pub struct OllamaResponse {
 #[derive(Deserialize, Debug)]
 pub struct RouterDecision {
     pub route: String,
-    pub query: String,
 }
 
 #[derive(Deserialize, Debug)]

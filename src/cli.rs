@@ -31,7 +31,7 @@ pub enum Commands {
         query: String,
     },
     /// Execute a raw SQL query against the SAP data
-    AskSql {
+    ExecuteSql {
         query: String,
     },
     /// Force the LLM to generate and run a SQL query
