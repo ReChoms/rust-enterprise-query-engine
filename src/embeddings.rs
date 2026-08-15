@@ -2,7 +2,6 @@ use candle_core::{Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config};
 use anyhow::Result;
-use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 use tokenizers::Tokenizer;

@@ -3,7 +3,7 @@ mod integration_tests {
     use crate::db::execute_semantic_search;
     use crate::ingest::execute_ingestion;
     use crate::embeddings::load_model;
-    use crate::llm::{ask_llm, build_routing_prompt};
+    use crate::llm::{build_routing_prompt, OllamaClient};
     use crate::types::RouterDecision;
     use std::io::Write;
     use std::sync::Arc;
@@ -52,15 +52,17 @@ mod integration_tests {
     #[tokio::test]
     #[ignore = "Requires Ollama daemon running on localhost:11434"]
     async fn test_llm_router_determinism() {
+        let client = OllamaClient::init_from_env_or_default().unwrap();
+
         // Test 1: Exact SQL match
         let sql_prompt = build_routing_prompt("How many customers are in Berlin?");
-        let sql_json = ask_llm(&sql_prompt).await.unwrap();
+        let sql_json = client.prompt_model(&sql_prompt).await.unwrap();
         let sql_decision: RouterDecision = serde_json::from_str(&sql_json).unwrap();
         assert_eq!(sql_decision.route, "SQL", "LLM Hallucinated on SQL query");
 
         // Test 2: Fuzzy Semantic match
         let fuzzy_prompt = build_routing_prompt("Find companies that bake bread.");
-        let fuzzy_json = ask_llm(&fuzzy_prompt).await.unwrap();
+        let fuzzy_json = client.prompt_model(&fuzzy_prompt).await.unwrap();
         let fuzzy_decision: RouterDecision = serde_json::from_str(&fuzzy_json).unwrap();
         assert_eq!(fuzzy_decision.route, "SEMANTIC", "LLM Hallucinated on Semantic query");
     }
@@ -234,7 +236,7 @@ mod integration_tests {
     #[tokio::test]
     #[ignore = "Heavy E2E Test: Runs full AskSemantic pipeline requiring Live Ollama and BAAI models"]
     async fn test_heavy_e2e_ask_semantic_pipeline() {
-        use crate::llm::{ask_llm, build_question_parser_prompt, build_semantic_prompt, parse_llm_json, verify_and_parse_llm_generation};
+        use crate::llm::{build_question_parser_prompt, build_semantic_prompt, parse_llm_json, verify_and_parse_llm_generation, OllamaClient};
         use crate::types::ParsedQuestion;
         use crate::db::execute_semantic_search;
         use crate::ingest::execute_ingestion;
@@ -257,10 +259,11 @@ mod integration_tests {
 
         // --- Execute Real AskSemantic Flow ---
         let query = "Who is the technology company in Berlin?";
+        let client = OllamaClient::init_from_env_or_default().unwrap();
 
         // 1. LLM Parses Intent (Live Ollama call)
         let parser_prompt = build_question_parser_prompt(query);
-        let raw_parser_output = ask_llm(&parser_prompt).await.unwrap();
+        let raw_parser_output = client.prompt_model(&parser_prompt).await.unwrap();
         let parsed_query: ParsedQuestion = parse_llm_json(&raw_parser_output).unwrap();
         
         // 2. Vector DB Searches (Live Embeddings + LanceDB)
@@ -269,10 +272,61 @@ mod integration_tests {
 
         // 3. LLM Generates Final Output (Live Ollama call)
         let semantic_prompt = build_semantic_prompt(query, &chunks);
-        let raw_llm_output = ask_llm(&semantic_prompt).await.unwrap();
+        let raw_llm_output = client.prompt_model(&semantic_prompt).await.unwrap();
         let final_payload = verify_and_parse_llm_generation(&raw_llm_output, &chunks).unwrap();
 
         assert!(final_payload.answer_found, "Live LLM failed to generate answer from physical DB");
         assert!(final_payload.answer.contains("Alpha Tech"), "LLM generated wrong answer");
+    }
+
+    #[tokio::test]
+    async fn test_check_lancedb_health() {
+        use crate::db::check_lancedb_health;
+        use crate::ingest::execute_ingestion;
+        use crate::embeddings::load_model;
+        use std::io::Write;
+        use std::sync::Arc;
+        use tempfile::{tempdir, NamedTempFile};
+
+        let db_dir = tempdir().unwrap();
+        let db_uri = db_dir.path().to_str().unwrap();
+
+        let mut dummy_csv = NamedTempFile::new().unwrap();
+        writeln!(dummy_csv, "kunnr,name1,ort01,land1").unwrap();
+        writeln!(dummy_csv, "CUST01,Alpha Tech,Berlin,DE").unwrap();
+        writeln!(dummy_csv, "CUST02,Beta Tech,Munich,DE").unwrap();
+
+        let csv_path = dummy_csv.path().to_str().unwrap();
+        let (model, tokenizer) = load_model().await.expect("Failed to load model");
+        execute_ingestion(csv_path, db_uri, false, 2, Arc::clone(&model), Arc::clone(&tokenizer)).await.unwrap();
+
+        let total_records = check_lancedb_health(db_uri).await.expect("Health check failed");
+        assert_eq!(total_records, 2, "LanceDB health check reported wrong row count");
+    }
+
+    #[tokio::test]
+    async fn test_ollama_client_offline_probe_does_not_panic() {
+        use crate::llm::OllamaClient;
+        let client = OllamaClient::init_from_env_or_default().expect("Failed to init client");
+        // Fast probe should return false (or true if Ollama happens to be live) without hanging or panicking
+        let _online = client.is_healthy().await;
+    }
+
+    #[test]
+    fn test_degraded_response_serialization() {
+        use crate::types::{DegradedChunk, DegradedResponse};
+
+        let degraded = DegradedResponse {
+            degraded: true,
+            message: "LLM offline. Degraded results.".to_string(),
+            retrieved_chunks: vec![DegradedChunk {
+                chunk_id: "chunk_1".to_string(),
+                content: "Customer Acme in Berlin".to_string(),
+            }],
+        };
+
+        let json = serde_json::to_string(&degraded).unwrap();
+        assert!(json.contains("\"degraded\":true"));
+        assert!(json.contains("Customer Acme in Berlin"));
     }
 }

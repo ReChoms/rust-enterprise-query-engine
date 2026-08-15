@@ -38,4 +38,6 @@ pub enum Commands {
     AskAiSql {
         query: String,
     },
+    /// Check the health and connectivity of the LLM and Vector Database
+    Health,
 }

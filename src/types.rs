@@ -50,3 +50,24 @@ pub struct ParsedQuestion {
     pub intent: String,
     pub filters: Vec<String>,
 }
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct DegradedChunk {
+    pub chunk_id: String,
+    pub content: String,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct DegradedResponse {
+    pub degraded: bool,
+    pub message: String,
+    pub retrieved_chunks: Vec<DegradedChunk>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct HealthResponse {
+    pub status: String,
+    pub llm_connected: bool,
+    pub vector_db_connected: bool,
+    pub total_records: usize,
+}

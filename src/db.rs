@@ -227,6 +227,14 @@ pub async fn execute_fallback_search(
     Ok(retrieved_chunks)
 }
 
+/// Probes LanceDB connectivity and returns the total count of indexed vectors
+pub async fn check_lancedb_health(db_uri: &str) -> Result<usize> {
+    let vector_db = lancedb::connect(db_uri).execute().await?;
+    let target_table = vector_db.open_table("customers").execute().await?;
+    let total_rows = target_table.count_rows(None).await?;
+    Ok(total_rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
