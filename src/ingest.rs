@@ -7,7 +7,7 @@ use std::fs::File;
 use std::sync::Arc;
 use tracing::info;
 
-use crate::db::insert_batch;
+use crate::vector_db::insert_batch;
 use crate::embeddings::get_embeddings;
 use crate::types::Kna1Row;
 

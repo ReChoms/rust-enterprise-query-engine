@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod integration_tests {
-    use crate::db::execute_semantic_search;
+    use crate::vector_db::execute_semantic_search;
     use crate::ingest::execute_ingestion;
     use crate::embeddings::load_model;
     use crate::llm::{build_routing_prompt, OllamaClient};
@@ -97,7 +97,7 @@ mod integration_tests {
 
     #[tokio::test]
     async fn test_isolated_vector_retrieval() {
-        use crate::db::execute_semantic_search;
+        use crate::vector_db::execute_semantic_search;
         use crate::ingest::execute_ingestion;
         use crate::embeddings::load_model;
         use std::io::Write;
@@ -174,7 +174,7 @@ mod integration_tests {
 
     #[tokio::test]
     async fn test_fallback_search() {
-        use crate::db::execute_fallback_search;
+        use crate::vector_db::execute_fallback_search;
         use crate::ingest::execute_ingestion;
         use crate::embeddings::load_model;
         use std::io::Write;
@@ -238,7 +238,7 @@ mod integration_tests {
     async fn test_heavy_e2e_ask_semantic_pipeline() {
         use crate::llm::{build_question_parser_prompt, build_semantic_prompt, parse_llm_json, verify_and_parse_llm_generation, OllamaClient};
         use crate::types::ParsedQuestion;
-        use crate::db::execute_semantic_search;
+        use crate::vector_db::execute_semantic_search;
         use crate::ingest::execute_ingestion;
         use crate::embeddings::load_model;
         use std::io::Write;
@@ -281,7 +281,7 @@ mod integration_tests {
 
     #[tokio::test]
     async fn test_check_lancedb_health() {
-        use crate::db::check_lancedb_health;
+        use crate::vector_db::check_lancedb_health;
         use crate::ingest::execute_ingestion;
         use crate::embeddings::load_model;
         use std::io::Write;
@@ -328,5 +328,151 @@ mod integration_tests {
         let json = serde_json::to_string(&degraded).unwrap();
         assert!(json.contains("\"degraded\":true"));
         assert!(json.contains("Customer Acme in Berlin"));
+    }
+
+    #[tokio::test]
+    async fn test_sql_engine_json_lines_e2e() {
+        use crate::sql_engine::{execute_sql_query, init_datafusion, record_batches_to_json_lines};
+
+        let sql_engine = init_datafusion().await.expect("Failed to init DataFusion");
+        let batches = execute_sql_query(&sql_engine, "SELECT kunnr, name1, ort01 FROM kna1 LIMIT 2").await.expect("SQL execution failed");
+        let lines = record_batches_to_json_lines(&batches).expect("JSON serialization failed");
+
+        assert_eq!(lines.len(), 2, "Expected 2 JSON-Lines output");
+        for line in lines {
+            let parsed: serde_json::Value = serde_json::from_str(&line).expect("Output line was not valid JSON");
+            assert!(parsed.get("kunnr").is_some(), "Missing kunnr field");
+            assert!(parsed.get("name1").is_some(), "Missing name1 field");
+            assert!(parsed.get("ort01").is_some(), "Missing ort01 field");
+        }
+    }
+
+    #[test]
+    fn test_record_batches_to_json_lines_empty() {
+        use crate::sql_engine::record_batches_to_json_lines;
+        let lines = record_batches_to_json_lines(&[]).expect("Empty batch serialization failed");
+        assert!(lines.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_http_health_endpoint() {
+        use crate::server::{create_router, AppState};
+        use crate::llm::OllamaClient;
+        use crate::sql_engine::init_datafusion;
+        use crate::embeddings::load_model;
+        use axum::http::{Request, StatusCode};
+        use axum::body::Body;
+        use tower::ServiceExt;
+        use std::sync::Arc;
+
+        let (model, tokenizer) = load_model().await.expect("Failed to load model");
+        let sql_engine = init_datafusion().await.expect("Failed to init DataFusion");
+        let llm_client = OllamaClient::init_from_env_or_default().expect("Failed init client");
+
+        let state = AppState {
+            llm_client: Arc::new(llm_client),
+            sql_engine: Arc::new(sql_engine),
+            embedding_model: Arc::clone(&model),
+            tokenizer: Arc::clone(&tokenizer),
+            vector_db_uri: "data/sap_vectors".to_string(),
+        };
+
+        let app = create_router(state);
+        let response = app
+            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert!(response.status() == StatusCode::OK || response.status() == StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn test_http_sql_query_endpoint() {
+        use crate::server::{create_router, AppState};
+        use crate::llm::OllamaClient;
+        use crate::sql_engine::init_datafusion;
+        use crate::embeddings::load_model;
+        use axum::http::{Request, StatusCode, header};
+        use axum::body::Body;
+        use tower::ServiceExt;
+        use std::sync::Arc;
+
+        let (model, tokenizer) = load_model().await.expect("Failed to load model");
+        let sql_engine = init_datafusion().await.expect("Failed to init DataFusion");
+        let llm_client = OllamaClient::init_from_env_or_default().expect("Failed init client");
+
+        let state = AppState {
+            llm_client: Arc::new(llm_client),
+            sql_engine: Arc::new(sql_engine),
+            embedding_model: Arc::clone(&model),
+            tokenizer: Arc::clone(&tokenizer),
+            vector_db_uri: "data/sap_vectors".to_string(),
+        };
+
+        let app = create_router(state);
+        let req_body = serde_json::json!({
+            "query": "SELECT kunnr, name1 FROM kna1 LIMIT 2"
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/query/sql")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].get("kunnr").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_http_sql_query_injection_blocked() {
+        use crate::server::{create_router, AppState};
+        use crate::llm::OllamaClient;
+        use crate::sql_engine::init_datafusion;
+        use crate::embeddings::load_model;
+        use axum::http::{Request, StatusCode, header};
+        use axum::body::Body;
+        use tower::ServiceExt;
+        use std::sync::Arc;
+
+        let (model, tokenizer) = load_model().await.expect("Failed to load model");
+        let sql_engine = init_datafusion().await.expect("Failed to init DataFusion");
+        let llm_client = OllamaClient::init_from_env_or_default().expect("Failed init client");
+
+        let state = AppState {
+            llm_client: Arc::new(llm_client),
+            sql_engine: Arc::new(sql_engine),
+            embedding_model: Arc::clone(&model),
+            tokenizer: Arc::clone(&tokenizer),
+            vector_db_uri: "data/sap_vectors".to_string(),
+        };
+
+        let app = create_router(state);
+        let req_body = serde_json::json!({
+            "query": "DROP TABLE kna1"
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/query/sql")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

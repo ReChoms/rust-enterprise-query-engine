@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "sap-to-ai-bridge")]
+#[command(name = "rust-enterprise-query-engine")]
 #[command(about = "Bridging SAP ERP data with Semantic AI Search", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
@@ -24,20 +24,29 @@ pub enum Commands {
     },
     /// The Primary Router: dynamically chooses Semantic or SQL
     Ask {
-        query: String,
+        query: Option<String>,
     },
     /// Force a Semantic Vector Search
     AskSemantic {
-        query: String,
+        query: Option<String>,
     },
     /// Execute a raw SQL query against the SAP data
     ExecuteSql {
-        query: String,
+        query: Option<String>,
     },
     /// Force the LLM to generate and run a SQL query
     AskAiSql {
-        query: String,
+        query: Option<String>,
     },
     /// Check the health and connectivity of the LLM and Vector Database
     Health,
+    /// Start the high-performance Axum REST API server
+    Serve {
+        /// The host address (CLI flag `--host` or env var `HOST`, default: "0.0.0.0")
+        #[arg(short = 'H', long, env = "HOST", default_value = "0.0.0.0")]
+        host: String,
+        /// The port number (CLI flag `--port` or env var `PORT`, default: 8080)
+        #[arg(short, long, env = "PORT", default_value_t = 8080)]
+        port: u16,
+    },
 }
