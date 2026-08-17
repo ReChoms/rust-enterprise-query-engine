@@ -20,9 +20,9 @@ async fn download_file(url: &str, dest: &str) -> Result<String> {
 pub async fn load_model() -> Result<(Arc<BertModel>, Arc<Tokenizer>)> {
     info!("Fetching safetensors and config...");
 
-    let data_dir = "data";
+    let data_dir = std::env::var("MODEL_CACHE_DIR").unwrap_or_else(|_| "data".to_string());
 
-    std::fs::create_dir_all(data_dir)?;
+    std::fs::create_dir_all(&data_dir)?;
 
     let config_path = download_file(
         "https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/main/config.json",

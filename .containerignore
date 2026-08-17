@@ -1,0 +1,19 @@
+# Rust & Cargo
+target/
+**/*.rs.bk
+
+# Version Control
+.git/
+.gitignore
+
+# IDE & Debugging
+.vscode/
+.gdb_history
+
+# Docs & Logs
+*.md
+*.log
+
+# Scripts & Local Data Cache
+benchmark.sh
+data/
