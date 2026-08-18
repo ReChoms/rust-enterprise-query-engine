@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rust Enterprise Query Engine — Global System Architecture</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <script>
+        mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+    </script>
+    <style>
+        body {
+            background-color: #0b0f19;
+            color: #cbd5e1;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            display: flex;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+        .diagram-container {
+            flex: 1.35;
+            padding: 30px;
+            overflow: auto;
+            border-right: 1px solid #1e293b;
+        }
+        .mermaid {
+            background-color: #0f172a;
+            padding: 25px;
+            border-radius: 8px;
+            border: 1px solid #1e293b;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            min-width: 720px;
+        }
+        .docs-container {
+            flex: 1;
+            padding: 30px;
+            overflow-y: auto;
+            background-color: #0f172a;
+            line-height: 1.6;
+        }
+        h2 { color: #38bdf8; border-bottom: 1px solid #1e293b; padding-bottom: 8px; font-size: 1.35rem; }
+        h3 { color: #34d399; margin-top: 24px; font-size: 1.05rem; }
+        p { margin-bottom: 12px; font-size: 0.92rem; color: #94a3b8; }
+        pre {
+            background-color: #090d16;
+            padding: 12px;
+            border-radius: 6px;
+            border: 1px solid #1e293b;
+            overflow-x: auto;
+            color: #e2e8f0;
+            font-family: monospace;
+            font-size: 0.85em;
+        }
+        .nav-link {
+            display: inline-block;
+            margin-bottom: 15px;
+            font-size: 0.85rem;
+            color: #38bdf8;
+            text-decoration: none;
+        }
+        .nav-link:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+
+    <div class="diagram-container">
+        <div class="mermaid">
+        graph TD
+            Client(["Client Request<br>(CLI / STDIN Stream / Axum REST)"]) --> Router
+            
+            subgraph Ingress & Routing Layer
+                Router{"Ollama Intent Router<br><i>Classifies natural query intent</i>"}
+                Router -- "Route: SQL (Aggregations & Math)" --> SqlPipe
+                Router -- "Route: SEMANTIC (Fuzzy & Natural Q&A)" --> SemanticPipe
+                Router -- "Offline / Timeout Fallback" --> SemanticPipe
+            end
+
+            subgraph Phase 1: Analytical SQL Engine (Zero-Copy)
+                SqlPipe["run_sql_pipeline<br><i>Synthesizes SQL from Question</i>"]
+                SqlPipe --> ASTCheck{"validate_sql_is_safe<br><i>AST Parser Security Guard</i>"}
+                ASTCheck -- "Blocked (DROP / ALTER / Multi-Stmt)" --> SecurityErr(["Security Violation Error"])
+                ASTCheck -- "Allowed (Pure SELECT)" --> DFExec["Apache DataFusion 38.0<br><i>Zero-Copy Scan on Memory-Mapped CSV</i>"]
+                DFExec --> ArrowStream[/"Arrow RecordBatches<br><i>LineDelimitedWriter Direct STDOUT</i>"/]
+                ArrowStream --> FinalOut(["Client Response<br><i>Pure JSON-Lines Stream</i>"])
+            end
+
+            subgraph Phase 2: Neural Semantic RAG Engine
+                SemanticPipe["run_semantic_pipeline<br><i>Parses Intent & Filters</i>"]
+                SemanticPipe --> CandleBERT["Candle BERT Transformer<br><i>768-dim Embeddings (BAAI/bge-base-en-v1.5)</i>"]
+                CandleBERT --> LanceKNN["LanceDB Hybrid Search<br><i>kNN Vector Search + Exact Filters</i>"]
+                LanceKNN --> RetrievedChunks[/"retrieved_chunks (HashMap)<br><i>O(1) Original DB Text Dictionary</i>"/]
+                
+                RetrievedChunks --> LLMGen["Ollama Answer Generation<br><i>Strict JSON Schema</i>"]
+                LLMGen --> Verifier{"verify_and_parse_llm_generation<br><i>Byte-for-Byte Substring Match</i>"}
+                
+                Verifier -- "Valid Grounded Quote" --> FinalOut
+                Verifier -- "Missing / Hallucinated Quote" --> FallbackSQL["execute_fallback_search<br><i>Deterministic Keyword SQL Search</i>"]
+                FallbackSQL --> FallbackChunks[/"fallback_chunks (HashMap)"/]
+                FallbackChunks --> FallbackLLM["Ollama Second-Chance Generation"]
+                FallbackLLM --> FallbackVerify{"verify_and_parse_llm_generation"}
+                FallbackVerify -- "Valid Quote" --> FinalOut
+                FallbackVerify -- "Proven Non-Existent" --> ProvenAbsent(["Mathematical Absence Proven<br><i>Guaranteed Zero-Hallucination Rejection</i>"])
+            end
+
+            subgraph Cloud Orchestration (Kubernetes Pod)
+                K8sPod["Kubernetes Dual-Container Pod"]
+                K8sPod --- AppContainer["Container 1: Rust Engine API (Port 8080)"]
+                K8sPod --- OllamaSidecar["Container 2: Ollama Sidecar (Port 11434)"]
+                AppContainer --- Loopback(["Localhost Loopback Network (0ms Latency)"])
+                OllamaSidecar --- Loopback
+                K8sPod --- PVC[("PersistentVolumeClaim<br>/data/sap_vectors & kna1.csv")]
+            end
+        </div>
+    </div>
+
+    <div class="docs-container">
+        <a class="nav-link" href="semantic_rag_pipeline.html">→ Switch to Deep-Dive Semantic RAG Pipeline Guide</a>
+        <h2>Rust Enterprise Query Engine — Global System Blueprint</h2>
+        <p>This document provides the high-level systems architecture specification for the <strong>Rust Enterprise Query Engine</strong>.</p>
+
+        <h3>1. Ingress Flexibility ($O(1)$ Stream Processing)</h3>
+        <p>The query engine supports three interchangeable ingress channels:</p>
+        <ul>
+            <li><strong>Interactive CLI:</strong> <code>rust-enterprise-query-engine ask "Query"</code></li>
+            <li><strong>Unix STDIN Streaming:</strong> <code>cat queries.txt | rust-enterprise-query-engine ask</code> with $O(1)$ flat memory consumption.</li>
+            <li><strong>Axum REST Microservice:</strong> High-throughput HTTP endpoints on port <code>8080</code>.</li>
+        </ul>
+
+        <h3>2. Dual-Engine Architecture</h3>
+        <p>Queries are classified into two deterministic execution paths:</p>
+        <ul>
+            <li><strong>Analytical SQL Engine (<code>src/sql_engine.rs</code>):</strong> Zero-copy Apache DataFusion executing over Apache Arrow 51 dataframes with AST security checks.</li>
+            <li><strong>Neural Semantic Engine (<code>src/vector_db.rs</code> & <code>src/embeddings.rs</code>):</strong> In-process Candle BERT embeddings + LanceDB 0.15 with anti-hallucination verification.</li>
+        </ul>
+
+        <h3>3. Kubernetes Cloud Orchestration</h3>
+        <p>Deployable as a dual-container Pod where the lightweight Rust binary runs alongside an Ollama LLM sidecar over kernel loopback (<code>localhost:11434</code>), with durable LanceDB volume mounts.</p>
+    </div>
+
+</body>
+</html>

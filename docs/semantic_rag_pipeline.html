@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rust Enterprise Query Engine — Semantic RAG Pipeline</title>
+    <!-- Load Mermaid.js from CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <script>
+        mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+    </script>
+    <style>
+        body {
+            background-color: #0b0f19;
+            color: #cbd5e1;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+        .diagram-container {
+            flex: 1.25;
+            padding: 30px;
+            overflow: auto;
+            border-right: 1px solid #1e293b;
+        }
+        .mermaid {
+            background-color: #0f172a;
+            padding: 25px;
+            border-radius: 8px;
+            border: 1px solid #1e293b;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            min-width: 650px;
+        }
+        .docs-container {
+            flex: 1;
+            padding: 30px;
+            overflow-y: auto;
+            background-color: #0f172a;
+            line-height: 1.6;
+        }
+        h2 { color: #38bdf8; border-bottom: 1px solid #1e293b; padding-bottom: 8px; font-size: 1.35rem; }
+        h3 { color: #34d399; margin-top: 24px; font-size: 1.05rem; }
+        p { margin-bottom: 12px; font-size: 0.92rem; color: #94a3b8; }
+        pre {
+            background-color: #090d16;
+            padding: 12px;
+            border-radius: 6px;
+            border: 1px solid #1e293b;
+            overflow-x: auto;
+            color: #e2e8f0;
+            font-family: monospace;
+            font-size: 0.85em;
+        }
+        .nav-link {
+            display: inline-block;
+            margin-bottom: 15px;
+            font-size: 0.85rem;
+            color: #38bdf8;
+            text-decoration: none;
+        }
+        .nav-link:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+
+    <div class="diagram-container">
+        <div class="mermaid">
+        graph TD
+            Input(["User Natural Language Query<br><i>CLI / STDIN / HTTP Request</i>"]) --> ParseQ
+            
+            subgraph Phase 1: Semantic Vector Retrieval
+                ParseQ["1. llm::build_question_parser_prompt<br><i>Separates semantic intent from exact filters</i>"] 
+                ParseQ --> Embed["2. embeddings::get_embeddings<br><i>Candle BERT transforms intent to 768-dim vector</i>"]
+                Embed --> LanceDB["3. vector_db::execute_semantic_search<br><i>LanceDB kNN search + keyword retention</i>"]
+                LanceDB --> RetrievedChunks[/"retrieved_chunks (HashMap)<br><i>O(1) dictionary of original DB text chunks</i>"/]
+                
+                RetrievedChunks --> PromptGen["4. llm::build_semantic_prompt<br><i>Injects chunks & strict JSON schema</i>"]
+                PromptGen --> OllamaCall["5. OllamaClient::prompt_model<br><i>Executes local Llama3.2 inference</i>"]
+                OllamaCall --> RawOutput[/"raw_llm_output (JSON String)"/]
+                
+                RawOutput --> Verifier{"6. llm::verify_and_parse_llm_generation<br><i>Byte-for-byte exact substring firewall</i>"}
+                Verifier -- "Valid Grounded Quote" --> Output
+                Verifier -- "Missing / Hallucinated Quote" --> FallbackSearch
+            end
+
+            subgraph Phase 2: Deterministic Literal Keyword Fallback
+                FallbackSearch["7. vector_db::execute_fallback_search<br><i>Translates intent into SQL LIKE clauses</i>"]
+                FallbackSearch --> FallbackChunks[/"fallback_chunks (HashMap)<br><i>Exact matching database text</i>"/]
+                
+                FallbackChunks --> PromptGen2["8. llm::build_semantic_prompt<br><i>Second-chance prompt generation</i>"]
+                PromptGen2 --> OllamaCall2["9. OllamaClient::prompt_model"]
+                OllamaCall2 --> RawOutput2[/"raw_fallback_output"/]
+                
+                RawOutput2 --> Verifier2{"10. llm::verify_and_parse_llm_generation"}
+                Verifier2 -- "Valid Quote" --> Output
+                Verifier2 -- "Missing / Proven Absent" --> AbsenceProven(["11. Mathematical Absence Proven<br><i>Guaranteed Zero-Hallucination Rejection</i>"])
+            end
+
+            Output(["final_payload (SemanticResponse)<br><i>Verified, mathematically grounded JSON object</i>"])
+        </div>
+    </div>
+
+    <div class="docs-container">
+        <a class="nav-link" href="system_architecture.html">← Back to Global System Architecture</a>
+        <h2>Semantic RAG Pipeline & Anti-Hallucination Engine</h2>
+        <p>This panel breaks down the exact data transformations happening at each stage of the semantic retrieval pipeline.</p>
+
+        <h3>Phase 1: Semantic Vector Retrieval</h3>
+        <p><strong>1. Intent & Filter Extraction:</strong> The raw query is parsed to isolate semantic intent (e.g. <em>"customers in Berlin"</em>) from exact negative filters (e.g. <code>NOT DE</code>).</p>
+        <p><strong>2. In-Process Candle Embeddings:</strong> <code>candle-core</code> generates 768-dimensional normalized dense vectors using local HuggingFace Safetensors without Python runtime dependencies.</p>
+        <p><strong>3. LanceDB kNN Search:</strong> Retrieves top-k nearest neighbor vector chunks and stores them in an $O(1)$ lookup <code>HashMap&lt;String, Arc&lt;str&gt;&gt;</code>.</p>
+        <p><strong>4. Anti-Hallucination Firewall:</strong> Rather than using secondary AI checks, Rust executes a physical byte-for-byte substring check:</p>
+<pre>
+let source_text = retrieved_chunks.get(&payload.source_chunk_id);
+if !source_text.contains(&payload.exact_quote) {
+    bail!("SECURITY VIOLATION: Hallucination detected.");
+}
+</pre>
+
+        <h3>Phase 2: Literal Keyword Fallback (Absence Proofing)</h3>
+        <p>If Phase 1 fails (either because <code>answer_found</code> was false, or the AI hallucinated), the engine triggers an exact SQL keyword search across LanceDB:</p>
+<pre>
+// Internal SQL Execution
+"sentence LIKE '%Berlin%' AND sentence LIKE '%Bakeries%'"
+</pre>
+        <p>If the fallback search yields zero matches, the system mathematically proves that the requested information does not exist in the corpus, preventing fabricated answers.</p>
+    </div>
+
+</body>
+</html>

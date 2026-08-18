@@ -13,6 +13,8 @@ target/
 # Docs & Logs
 *.md
 *.log
+docs/
+k8s/
 
 # Scripts & Local Data Cache
 benchmark.sh
