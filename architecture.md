@@ -66,34 +66,41 @@
 * **Framework:** Axum 0.7 + Tower HTTP.
 * **Shared State:** `AppState` encapsulates `Arc<BertModel>`, `Arc<Tokenizer>`, `Arc<SessionContext>`, and `Arc<OllamaClient>`.
 * **Endpoints:**
-  * `GET /health` — Diagnostics & Kubernetes liveness/readiness probe.
+  * `GET /health` — Diagnostics, connection health, and table record counts.
   * `POST /query` — Dynamic LLM router dispatch.
   * `POST /query/sql` — Direct secured DataFusion SQL execution.
   * `POST /query/semantic` — Semantic RAG search.
 
 ---
 
-## 4. Cloud Deployment & Kubernetes Topology
+## 4. Bare-Metal & Standalone OCI Systems Architecture
 
 ```text
- ┌─────────────────────────────────────────────────────────────────────────┐
- │                            Kubernetes Pod                               │
- │                                                                         │
- │  ┌─────────────────────────────────┐   ┌─────────────────────────────┐  │
- │  │      Query Engine Container     │   │    Ollama Sidecar Container │  │
- │  │        (Axum REST Service)      │   │       (LLM Inference)       │  │
- │  │                                 │   │                             │  │
- │  │  • Port 8080                    │   │  • Port 11434               │  │
- │  │  • Distroless Base (~60MB)      │   │  • Localhost Loopback       │  │
- │  │  • Multi-threaded Tokio Runtime │   │  • GPU/CPU Accelerated      │  │
- │  └────────────────┬────────────────┘   └──────────────┬──────────────┘  │
- │                   │                                   │                 │
- │                   └─────────► localhost:11434 ◄───────┘                 │
- │                                                                         │
- │  ┌───────────────────────────────────────────────────────────────────┐  │
- │  │              Persistent Volume Claim (PVC): /data                 │  │
- │  │        • data/kna1.csv (Raw ERP Table)                            │  │
- │  │        • data/sap_vectors (LanceDB Columnar Vector Store)         │  │
- │  └───────────────────────────────────────────────────────────────────┘  │
- └─────────────────────────────────────────────────────────────────────────┘
+ ┌─────────────────────────────────────────────────────────────────────┐
+ │                Bare-Metal Host / Standalone OCI Container           │
+ │                                                                     │
+ │  ┌───────────────────────────────────────────────────────────────┐  │
+ │  │        Query Engine (Axum REST API on Native Linux Socket)    │  │
+ │  │                                                               │  │
+ │  │  • Port 8080 (TCP_NODELAY enabled, zero buffering delay)      │  │
+ │  │  • Distroless Base (~60MB) / Native Binary (15MB RSS RAM)     │  │
+ │  │  • Tokio Multi-threaded Work-Stealer Runtime (`epoll`)        │  │
+ │  │  • Non-blocking CPU Tensor Handoff (`spawn_blocking`)         │  │
+ │  │  • Tower Concurrency Limiter (Instant HTTP 503 Load Shedding) │  │
+ │  └──────────────────────────────┬────────────────────────────────┘  │
+ │                                 │                                   │
+ │                                 ├──────────► Persistent NVMe/Disk   │
+ │                                 │            • data/kna1.csv        │
+ │                                 │            • data/sap_vectors/    │
+ │                                 │                                   │
+ │                                 ▼ (HTTP Keep-Alive Connection Pool) │
+ │                 [ Dedicated Async GPU Model Hub ]                   │
+ │                 • vLLM / Triton / Ollama (Port 11434)               │
+ │                 • Continuous Batching on Dedicated Tensor Cores     │
+ └─────────────────────────────────────────────────────────────────────┘
 ```
+
+### 4.1 Low-Latency Systems Principles Applied
+1. **Direct Socket I/O**: Eliminates 2–5ms Kubernetes CNI bridge and ingress proxy translation penalties.
+2. **Zero CFS CPU Throttling**: Avoids Linux kernel CPU quota freezes during parallel SIMD tensor operations.
+3. **Deterministic Memory Bounds**: Enforces strict $O(1)$ memory usage through streaming Arrow `LineDelimitedWriter` and Tower load shedding.
