@@ -64,13 +64,14 @@ async fn main() -> Result<()> {
     debug::init_logger();
 
     let cli = Cli::parse();
+    let vector_db_uri = std::env::var("VECTOR_DB_URI").unwrap_or_else(|_| "data/sap_vectors".to_string());
     let llm_client = OllamaClient::init_from_env_or_default()?;
 
     match &cli.command {
         Commands::Ingest { file, overwrite, batch_size } => {
             info!("Loading embedding model (BAAI/bge-base-en-v1.5)...");
             let (model, tokenizer) = load_model().await?;
-            execute_ingestion(file, "data/sap_vectors", *overwrite, *batch_size, Arc::clone(&model), Arc::clone(&tokenizer)).await?;
+            execute_ingestion(file, &vector_db_uri, *overwrite, *batch_size, Arc::clone(&model), Arc::clone(&tokenizer)).await?;
         }
         Commands::AskSemantic { query } => {
             info!(">>> Executing ASK-SEMANTIC command");
@@ -79,7 +80,7 @@ async fn main() -> Result<()> {
             let queries = resolve_query_inputs(query)?;
             for q_res in queries {
                 let q = q_res?;
-                run_semantic_pipeline(&llm_client, Arc::clone(&model), Arc::clone(&tokenizer), &q).await?;
+                run_semantic_pipeline(&llm_client, Arc::clone(&model), Arc::clone(&tokenizer), &q, &vector_db_uri).await?;
             }
         }
         Commands::Ask { query } => {
@@ -112,7 +113,7 @@ async fn main() -> Result<()> {
                                 model_bundle = Some(load_model().await?);
                             }
                             if let Some((model, tokenizer)) = model_bundle.as_ref() {
-                                run_semantic_pipeline(&llm_client, Arc::clone(model), Arc::clone(tokenizer), &q).await?;
+                                run_semantic_pipeline(&llm_client, Arc::clone(model), Arc::clone(tokenizer), &q, &vector_db_uri).await?;
                             }
                         }
                     }
@@ -123,7 +124,7 @@ async fn main() -> Result<()> {
                             model_bundle = Some(load_model().await?);
                         }
                         if let Some((model, tokenizer)) = model_bundle.as_ref() {
-                            run_semantic_pipeline(&llm_client, Arc::clone(model), Arc::clone(tokenizer), &q).await?;
+                            run_semantic_pipeline(&llm_client, Arc::clone(model), Arc::clone(tokenizer), &q, &vector_db_uri).await?;
                         }
                     }
                 }
@@ -152,7 +153,7 @@ async fn main() -> Result<()> {
         Commands::Health => {
             info!(">>> Executing HEALTH command");
             let llm_online = llm_client.is_healthy().await;
-            let lancedb_stats = check_lancedb_health("data/sap_vectors").await;
+            let lancedb_stats = check_lancedb_health(&vector_db_uri).await;
 
             let (vector_db_connected, total_records) = match lancedb_stats {
                 Ok(count) => (true, count),
@@ -183,7 +184,6 @@ async fn main() -> Result<()> {
             info!("Loading embedding model (BAAI/bge-base-en-v1.5)...");
             let (model, tokenizer) = load_model().await?;
             let sql_engine = init_datafusion().await?;
-            let vector_db_uri = std::env::var("VECTOR_DB_URI").unwrap_or_else(|_| "data/sap_vectors".to_string());
             info!("Connecting to LanceDB vector storage at '{}'...", vector_db_uri);
             let state = server::AppState {
                 llm_client: Arc::new(llm_client),
@@ -218,6 +218,7 @@ async fn run_semantic_pipeline(
     model: Arc<candle_transformers::models::bert::BertModel>,
     tokenizer: Arc<tokenizers::Tokenizer>,
     query: &str,
+    vector_db_uri: &str,
 ) -> Result<()> {
     info!("Parsing raw query to separate semantic intent from exact filters...");
     let parser_prompt = build_question_parser_prompt(query);
@@ -237,7 +238,7 @@ async fn run_semantic_pipeline(
         }
     };
 
-    let chunks = execute_semantic_search(&parsed_query.intent, "data/sap_vectors", &parsed_query.filters, model, tokenizer).await?;
+    let chunks = execute_semantic_search(&parsed_query.intent, vector_db_uri, &parsed_query.filters, model, tokenizer).await?;
     
     info!("Passing retrieved chunks to LLM for deterministic generation...");
     let semantic_prompt = build_semantic_prompt(query, &chunks);
@@ -247,7 +248,7 @@ async fn run_semantic_pipeline(
             
             if !final_payload.answer_found {
                 info!("Vector search failed. Triggering deterministic fallback (Absence Proof)...");
-                let fallback_chunks = execute_fallback_search(&parsed_query.intent, "data/sap_vectors").await?;
+                let fallback_chunks = execute_fallback_search(&parsed_query.intent, vector_db_uri).await?;
                 
                 if !fallback_chunks.is_empty() {
                     info!("Fallback search found missing chunks. Re-querying LLM...");

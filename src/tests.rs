@@ -475,4 +475,56 @@ mod integration_tests {
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
+
+    #[tokio::test]
+    async fn test_create_tuned_tcp_listener_binds_and_accepts() {
+        use crate::server::create_tuned_tcp_listener;
+        use std::net::SocketAddr;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // Bind to ephemeral OS port (port 0)
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = create_tuned_tcp_listener(addr).expect("Failed to create tuned listener");
+        let local_addr = listener.local_addr().expect("Failed to get local addr");
+
+        // Spawn asynchronous client connection
+        let client_task = tokio::spawn(async move {
+            let mut stream = tokio::net::TcpStream::connect(local_addr).await.expect("Failed to connect");
+            stream.write_all(b"PING").await.expect("Failed to write to tuned socket");
+        });
+
+        // Accept and verify live byte transmission across tuned socket
+        let (mut server_stream, _) = listener.accept().await.expect("Failed to accept connection");
+        let mut buf = [0u8; 4];
+        server_stream.read_exact(&mut buf).await.expect("Failed to read from server stream");
+        assert_eq!(&buf, b"PING");
+
+        client_task.await.expect("Client task failed");
+    }
+
+    #[tokio::test]
+    async fn test_handle_load_shed_error_mappings() {
+        use axum::http::StatusCode;
+        use crate::server::handle_load_shed_error;
+
+        // Branch 1: Tower Overloaded error must map to HTTP 503 Service Unavailable
+        let overloaded_err = Box::new(tower::load_shed::error::Overloaded::new());
+        let (status, body) = handle_load_shed_error(overloaded_err).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("Server overloaded, request shed to protect memory stability")
+        );
+        assert_eq!(body.get("status_code").and_then(|v| v.as_i64()), Some(503));
+
+        // Branch 2: Generic unhandled middleware error must map to HTTP 500 Internal Server Error
+        let generic_err = Box::new(std::io::Error::other("unexpected middleware fault"));
+        let (status_500, body_500) = handle_load_shed_error(generic_err).await;
+        assert_eq!(status_500, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            body_500.get("error").and_then(|v| v.as_str()),
+            Some("Unhandled middleware error: unexpected middleware fault")
+        );
+        assert_eq!(body_500.get("status_code").and_then(|v| v.as_i64()), Some(500));
+    }
 }
