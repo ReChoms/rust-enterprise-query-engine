@@ -1,13 +1,15 @@
+use anyhow::{anyhow, Result};
 use arrow_array::builder::{FixedSizeListBuilder, PrimitiveBuilder};
 use arrow_array::types::Float32Type;
 use arrow_array::{Array, RecordBatch, RecordBatchIterator, StringArray};
 use arrow_schema::Schema;
+use futures::StreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
-use anyhow::{anyhow, Result};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
 
-use crate::embeddings::get_embeddings;
+use super::embeddings::get_embeddings;
 
 pub async fn insert_batch(
     vector_db: &lancedb::Connection,
@@ -17,22 +19,13 @@ pub async fn insert_batch(
     embeddings: Vec<Vec<f32>>,
 ) -> Result<()> {
     let kunnr_array = StringArray::from(
-        records
-            .iter()
-            .map(|r| Some(r.2.clone()))
-            .collect::<Vec<_>>(),
+        records.iter().map(|r| Some(r.2.clone())).collect::<Vec<_>>(),
     );
     let name_array = StringArray::from(
-        records
-            .iter()
-            .map(|r| Some(r.0.clone()))
-            .collect::<Vec<_>>(),
+        records.iter().map(|r| Some(r.0.clone())).collect::<Vec<_>>(),
     );
     let city_array = StringArray::from(
-        records
-            .iter()
-            .map(|r| Some(r.1.clone()))
-            .collect::<Vec<_>>(),
+        records.iter().map(|r| Some(r.1.clone())).collect::<Vec<_>>(),
     );
     let sentence_array = StringArray::from(documents.to_vec());
 
@@ -72,30 +65,27 @@ pub async fn insert_batch(
 
 async fn extract_chunks_from_stream(
     mut stream: lancedb::arrow::SendableRecordBatchStream,
-    retrieved_chunks: &mut std::collections::HashMap<String, std::sync::Arc<str>>,
+    retrieved_chunks: &mut HashMap<String, Arc<str>>,
 ) -> Result<()> {
-    use futures::StreamExt;
-    
     while let Some(result) = stream.next().await {
         let batch = result?;
 
-        let name_arr = batch.column_by_name("name").and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>());
-        let city_arr = batch.column_by_name("city").and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>());
-        let kunnr_arr = batch.column_by_name("kunnr").and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>());
+        let name_arr = batch.column_by_name("name").and_then(|c| c.as_any().downcast_ref::<StringArray>());
+        let city_arr = batch.column_by_name("city").and_then(|c| c.as_any().downcast_ref::<StringArray>());
+        let kunnr_arr = batch.column_by_name("kunnr").and_then(|c| c.as_any().downcast_ref::<StringArray>());
 
         if let (Some(names), Some(cities), Some(kunnrs)) = (name_arr, city_arr, kunnr_arr) {
             for i in 0..batch.num_rows() {
                 let kunnr = kunnrs.value(i).to_string();
                 let name = names.value(i).to_string();
                 let city = cities.value(i).to_string();
-                
-                // Maintain structured relational boundaries instead of flattening
+
                 let chunk_json = serde_json::json!({
                     "kunnr": kunnr,
                     "name": name,
                     "city": city
                 }).to_string();
-                retrieved_chunks.insert(kunnr, std::sync::Arc::from(chunk_json));
+                retrieved_chunks.insert(kunnr, Arc::from(chunk_json));
             }
         }
     }
@@ -108,7 +98,7 @@ pub async fn execute_semantic_search(
     filters: &[String],
     model: Arc<candle_transformers::models::bert::BertModel>,
     tokenizer: Arc<tokenizers::Tokenizer>,
-) -> Result<std::collections::HashMap<String, std::sync::Arc<str>>> {
+) -> Result<HashMap<String, Arc<str>>> {
     info!("Embedding search query...");
     let embeddings = get_embeddings(vec![query.to_string()], tokenizer, model).await?;
     let query_vector = embeddings.into_iter().next().ok_or_else(|| anyhow!("Failed to generate embedding"))?;
@@ -117,7 +107,7 @@ pub async fn execute_semantic_search(
     let vector_db = lancedb::connect(db_uri).execute().await?;
     let target_table = vector_db.open_table("customers").execute().await?;
 
-    let mut retrieved_chunks = std::collections::HashMap::new();
+    let mut retrieved_chunks = HashMap::new();
 
     info!("Executing semantic search (Fuzzy Pass)...");
     let vector_stream = target_table.query().nearest_to(query_vector)?.limit(5).execute().await?;
@@ -129,10 +119,8 @@ pub async fn execute_semantic_search(
         let term = if is_not { filter.strip_prefix("NOT ").unwrap_or(filter.as_str()) } else { filter.as_str() };
 
         if is_not {
-            // Programmatically destroy chunks containing negative constraints
             retrieved_chunks.retain(|_, v| !v.contains(term));
         } else {
-            // Deterministically retrieve exactly matching chunks
             let sql = format!("sentence LIKE '%{}%'", term);
             let exact_stream = target_table.query().only_if(sql).limit(5).execute().await?;
             extract_chunks_from_stream(exact_stream, &mut retrieved_chunks).await?;
@@ -144,45 +132,32 @@ pub async fn execute_semantic_search(
 
 pub fn build_fallback_sql(intent: &str) -> String {
     let mut conditions = Vec::new();
-    
     for word in intent.split_whitespace() {
-        // Standard SQL escaping: double up single quotes to prevent string literal breakout
         let escaped_word = word.replace("'", "''");
         conditions.push(format!("sentence LIKE '%{}%'", escaped_word));
     }
-    
     if conditions.is_empty() {
-        return "1=0".to_string(); // Fail-safe for empty inputs prevents syntax errors
+        return "1=0".to_string();
     }
-    
     conditions.join(" AND ")
 }
 
 pub async fn execute_fallback_search(
     intent: &str,
     db_uri: &str,
-) -> Result<std::collections::HashMap<String, std::sync::Arc<str>>> {
+) -> Result<HashMap<String, Arc<str>>> {
     info!("Vector search failed. Executing deterministic fallback search (Absence Proof) for: {}", intent);
-    
     let vector_db = lancedb::connect(db_uri).execute().await?;
     let target_table = vector_db.open_table("customers").execute().await?;
 
-    let mut retrieved_chunks = std::collections::HashMap::new();
-    
+    let mut retrieved_chunks = HashMap::new();
     let sql = build_fallback_sql(intent);
-    
-    let exact_stream = target_table.query()
-        .only_if(sql)
-        .limit(5)
-        .execute()
-        .await?;
-        
+    let exact_stream = target_table.query().only_if(sql).limit(5).execute().await?;
     extract_chunks_from_stream(exact_stream, &mut retrieved_chunks).await?;
 
     Ok(retrieved_chunks)
 }
 
-/// Probes LanceDB connectivity and returns the total count of indexed vectors
 pub async fn check_lancedb_health(db_uri: &str) -> Result<usize> {
     let vector_db = lancedb::connect(db_uri).execute().await?;
     let target_table = vector_db.open_table("customers").execute().await?;
@@ -198,7 +173,6 @@ mod tests {
     fn test_fallback_sql_sanitization() {
         let intent = "find customer 'O'Connor'";
         let sql = build_fallback_sql(intent);
-        // Should safely escape single quotes by doubling them, preserving data integrity
         assert_eq!(sql, "sentence LIKE '%find%' AND sentence LIKE '%customer%' AND sentence LIKE '%''O''Connor''%'");
     }
 }

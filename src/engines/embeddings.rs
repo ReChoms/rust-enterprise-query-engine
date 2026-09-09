@@ -1,7 +1,7 @@
+use anyhow::Result;
 use candle_core::{Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config};
-use anyhow::Result;
 use std::path::Path;
 use std::sync::Arc;
 use tokenizers::Tokenizer;
@@ -17,11 +17,11 @@ async fn download_file(url: &str, dest: &str) -> Result<String> {
     Ok(dest.to_string())
 }
 
+/// Downloads (if missing) and loads the BAAI/bge-base-en-v1.5 embedding model into memory.
 pub async fn load_model() -> Result<(Arc<BertModel>, Arc<Tokenizer>)> {
     info!("Fetching safetensors and config...");
 
     let data_dir = std::env::var("MODEL_CACHE_DIR").unwrap_or_else(|_| "data".to_string());
-
     std::fs::create_dir_all(&data_dir)?;
 
     let config_path = download_file(
@@ -42,9 +42,7 @@ pub async fn load_model() -> Result<(Arc<BertModel>, Arc<Tokenizer>)> {
     let config = std::fs::read_to_string(config_path)?;
     let config: Config = serde_json::from_str(&config)?;
 
-    let mut tokenizer =
-        Tokenizer::from_file(tokenizer_path).map_err(anyhow::Error::msg)?;
-
+    let mut tokenizer = Tokenizer::from_file(tokenizer_path).map_err(anyhow::Error::msg)?;
     tokenizer.with_padding(Some(tokenizers::PaddingParams {
         strategy: tokenizers::PaddingStrategy::BatchLongest,
         ..Default::default()
@@ -67,6 +65,7 @@ fn normalize_vector(mut vec: Vec<f32>) -> Vec<f32> {
     vec
 }
 
+/// Generates normalized dense vector embeddings using Candle BERT on dedicated CPU threads.
 pub async fn get_embeddings(
     sentences: Vec<String>,
     tokenizer: Arc<Tokenizer>,
@@ -88,7 +87,6 @@ pub async fn get_embeddings(
         let embeddings = model.forward(&token_ids, &token_type_ids, None)?;
 
         let cls_embeddings = embeddings.i((.., 0, ..))?;
-
         let raw_vecs = cls_embeddings.to_vec2::<f32>()?;
         let normalized_vecs = raw_vecs.into_iter().map(normalize_vector).collect();
 
@@ -105,14 +103,9 @@ mod tests {
 
     #[test]
     fn test_normalize_unit_vector() {
-        // A classic 3-4-5 triangle vector
         let vec = vec![3.0, 4.0];
         let normalized = normalize_vector(vec);
-        
-        // Magnitude is 5. Normalized should be 3/5 (0.6) and 4/5 (0.8)
         assert_eq!(normalized, vec![0.6, 0.8]);
-        
-        // Ensure new magnitude is precisely 1.0 (with float tolerance)
         let new_mag = normalized.iter().map(|&x| x * x).sum::<f32>().sqrt();
         assert!((new_mag - 1.0).abs() < 1e-6);
     }
@@ -121,7 +114,6 @@ mod tests {
     fn test_normalize_zero_vector() {
         let vec = vec![0.0, 0.0, 0.0];
         let normalized = normalize_vector(vec);
-        // Should bypass division entirely and safely return the 0 vector
         assert_eq!(normalized, vec![0.0, 0.0, 0.0]);
     }
 }
