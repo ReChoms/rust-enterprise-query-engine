@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package query_engine;
+
+service QueryService {
+    rpc ExecuteSql (SqlQueryRequest) returns (SqlQueryResponse);
+    rpc ExecuteSemantic (SemanticQueryRequest) returns (SemanticQueryResponse);
+    rpc CheckHealth (HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message SqlQueryRequest {
+    string query = 1;
+}
+
+message SqlQueryResponse {
+    bytes json_lines = 1;
+    uint32 row_count = 2;
+}
+
+message SemanticQueryRequest {
+    string query = 1;
+    uint32 top_k = 2;
+}
+
+message SemanticQueryResponse {
+    string answer = 1;
+    repeated RetrievedRecord records = 2;
+}
+
+message RetrievedRecord {
+    string kunnr = 1;
+    string sentence = 2;
+    float score = 3;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+    string status = 1;
+    bool llm_connected = 2;
+    bool vector_db_connected = 3;
+    uint64 total_records = 4;
+}

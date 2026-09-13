@@ -6,6 +6,7 @@
 
 pub mod cli;
 pub mod http;
+pub mod grpc;
 
 pub use cli::{resolve_query_inputs, Cli, Commands};
 pub use http::{create_router, create_tuned_tcp_listener, start_server};
@@ -18,7 +19,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{info, warn};
 
-use crate::common::types::{HealthResponse, RouterDecision};
+use http::HealthResponse;
+use crate::common::types::RouterDecision;
 use crate::engines::embeddings::load_model;
 use crate::engines::sql::{execute_sql_query, init_datafusion, write_record_batches_as_json_lines};
 use crate::engines::vector::check_lancedb_health;
@@ -196,10 +198,14 @@ pub async fn run() -> Result<()> {
 
             println!("{}", serde_json::to_string(&report)?);
         }
-        Commands::Serve { host, port } => {
-            let addr_str = format!("{}:{}", host, port);
-            let addr: SocketAddr = addr_str.parse()?;
-            info!("Booting Axum REST API microservice on {}", addr);
+        Commands::Serve {
+            host,
+            port,
+            grpc_port,
+        } => {
+            let http_addr: SocketAddr = format!("{}:{}", host, port).parse()?;
+            let grpc_addr: SocketAddr = format!("{}:{}", host, grpc_port).parse()?;
+            info!("Booting Dual-Protocol Engine (REST: {}, gRPC: {})", http_addr, grpc_addr);
             info!("Loading embedding model (BAAI/bge-base-en-v1.5)...");
             let (model, tokenizer) = load_model().await?;
             let sql_engine = init_datafusion().await?;
@@ -211,9 +217,38 @@ pub async fn run() -> Result<()> {
                 tokenizer,
                 vector_db_uri,
             };
-            start_server(state, addr).await?;
+            start_dual_server(state, http_addr, grpc_addr).await?;
         }
     }
 
+    Ok(())
+}
+
+/// Concurrently boots Axum REST API and Tonic gRPC Service sharing in-memory AppState.
+pub async fn start_dual_server(
+    state: AppState,
+    http_addr: SocketAddr,
+    grpc_addr: SocketAddr,
+) -> Result<()> {
+    let (tx, mut rx1) = tokio::sync::watch::channel(());
+    let mut rx2 = rx1.clone();
+    tokio::spawn(async move { http::shutdown_signal().await; let _ = tx.send(()); });
+
+    let http_state = state.clone();
+    let http = async move {
+        let listener = create_tuned_tcp_listener(http_addr)?;
+        info!("Axum REST API listening on http://{}", http_addr);
+        axum::serve(listener, create_router(http_state))
+            .with_graceful_shutdown(async move { let _ = rx1.changed().await; }).await?;
+        Ok::<(), anyhow::Error>(())
+    };
+    let grpc = async move {
+        info!("Tonic gRPC server listening on {}", grpc_addr);
+        tonic::transport::Server::builder()
+            .add_service(grpc::QueryServiceServer::new(grpc::QueryServiceImpl::new(state)))
+            .serve_with_shutdown(grpc_addr, async move { let _ = rx2.changed().await; }).await?;
+        Ok::<(), anyhow::Error>(())
+    };
+    tokio::try_join!(http, grpc)?;
     Ok(())
 }

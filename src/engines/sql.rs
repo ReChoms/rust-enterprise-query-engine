@@ -26,7 +26,11 @@ pub async fn execute_sql_query(sql_engine: &SessionContext, query: &str) -> Resu
 
     info!("Executing SQL: {}", query);
     let df = sql_engine.sql(query).await?;
-    let batches = df.collect().await?;
+    let max_rows: usize = std::env::var("MAX_SQL_ROWS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10_000);
+    let batches = df.limit(0, Some(max_rows))?.collect().await?;
 
     Ok(batches)
 }
@@ -52,8 +56,9 @@ pub fn record_batches_to_json_lines(batches: &[RecordBatch]) -> Result<Vec<Strin
     let raw_text = String::from_utf8(buffer)?;
     let lines = raw_text
         .lines()
-        .map(|l| l.trim().to_string())
+        .map(str::trim)
         .filter(|l| !l.is_empty())
+        .map(ToString::to_string)
         .collect();
 
     Ok(lines)

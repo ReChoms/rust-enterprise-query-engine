@@ -3,6 +3,7 @@
 //! Exposes REST endpoints, configures Linux kernel socket parameters,
 //! and applies Layer 7 load-shedding to protect against concurrency saturation.
 
+pub mod dto;
 pub mod middleware;
 pub mod routes;
 pub mod socket;
@@ -16,6 +17,7 @@ use tower::load_shed::LoadShedLayer;
 use tower::ServiceBuilder;
 use tracing::info;
 
+pub use dto::{ErrorResponse, HealthResponse, QueryRequest, SqlQueryRequest};
 pub use middleware::handle_load_shed_error;
 pub use routes::{health_handler, router_query_handler, semantic_query_handler, sql_query_handler};
 pub use socket::create_tuned_tcp_listener;
@@ -38,7 +40,7 @@ pub fn create_router(state: AppState) -> Router {
         )
 }
 
-async fn shutdown_signal() {
+pub async fn shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await

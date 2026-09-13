@@ -20,6 +20,20 @@ async fn test_sql_engine_json_lines_e2e() {
     }
 }
 
+#[tokio::test]
+async fn test_sql_engine_max_rows_limit_enforced() {
+    std::env::set_var("MAX_SQL_ROWS", "3");
+    let ctx = datafusion::prelude::SessionContext::new();
+    let query = "SELECT * FROM (VALUES (1), (2), (3), (4), (5), (6), (7), (8)) AS t(x)";
+    let batches = execute_sql_query(&ctx, query)
+        .await
+        .expect("Synthetic SQL execution failed");
+    std::env::remove_var("MAX_SQL_ROWS");
+
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 3, "Expected 8 synthetic rows to be clamped to MAX_SQL_ROWS=3");
+}
+
 #[test]
 fn test_record_batches_to_json_lines_empty() {
     let lines = record_batches_to_json_lines(&[]).expect("Empty batch serialization failed");

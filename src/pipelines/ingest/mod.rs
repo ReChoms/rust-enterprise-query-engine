@@ -25,6 +25,18 @@ pub async fn execute_ingestion(
     model: Arc<BertModel>,
     tokenizer: Arc<Tokenizer>,
 ) -> Result<()> {
+    let max_batch = std::env::var("MAX_EMBEDDING_BATCH_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1_024);
+    if batch_size == 0 || batch_size > max_batch {
+        anyhow::bail!(
+            "--batch-size must be between 1 and {} (received {})",
+            max_batch,
+            batch_size
+        );
+    }
+
     info!(">>> Executing INGEST command on file: {}", csv_path);
 
     info!("Connecting to LanceDB...");

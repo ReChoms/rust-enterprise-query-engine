@@ -42,14 +42,17 @@ pub enum Commands {
     },
     /// Check the health and connectivity of the LLM and Vector Database
     Health,
-    /// Start the high-performance Axum REST API server
+    /// Start the high-performance dual-protocol microservice (Axum REST + Tonic gRPC)
     Serve {
         /// The host address (CLI flag `--host` or env var `HOST`, default: "0.0.0.0")
         #[arg(short = 'H', long, env = "HOST", default_value = "0.0.0.0")]
         host: String,
-        /// The port number (CLI flag `--port` or env var `PORT`, default_value_t = 8080)
+        /// The HTTP REST port number (CLI flag `--port` or env var `PORT`, default_value_t = 8080)
         #[arg(short, long, env = "PORT", default_value_t = 8080)]
         port: u16,
+        /// The gRPC port number (CLI flag `--grpc-port` or env var `GRPC_PORT`, default_value_t = 50051)
+        #[arg(long, env = "GRPC_PORT", default_value_t = 50051)]
+        grpc_port: u16,
     },
 }
 

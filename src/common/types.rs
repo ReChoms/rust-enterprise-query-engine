@@ -8,16 +8,6 @@ pub struct Kna1Row {
     pub land1: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct QueryRequest {
-    pub query: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct SqlQueryRequest {
-    pub query: String,
-}
-
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct RouterDecision {
     pub route: String,
@@ -56,12 +46,4 @@ pub struct DegradedResponse {
     pub degraded: bool,
     pub message: String,
     pub retrieved_chunks: Vec<DegradedChunk>,
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone)]
-pub struct HealthResponse {
-    pub status: String,
-    pub llm_connected: bool,
-    pub vector_db_connected: bool,
-    pub total_records: usize,
 }
