@@ -12,6 +12,7 @@ use std::fs::File;
 use std::sync::Arc;
 use tokenizers::Tokenizer;
 use tracing::info;
+use crate::engines::vector::{create_scalar_index, create_vector_index};
 
 pub use chunker::{define_schema, process_csv_in_batches};
 pub use dedup::find_existing_in_db;
@@ -68,5 +69,9 @@ pub async fn execute_ingestion(
         "Successfully ingested {} total new records into LanceDB 'customers' table!",
         total_inserted
     );
+    if let Ok(table) = vector_db.open_table("customers").execute().await {
+        create_scalar_index(&table, "kunnr").await?;
+        create_vector_index(&table, "vector").await?;
+    }
     Ok(())
 }

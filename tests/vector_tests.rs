@@ -1,6 +1,7 @@
 use rust_enterprise_query_engine::engines::embeddings::load_model;
 use rust_enterprise_query_engine::engines::vector::{
-    check_lancedb_health, execute_fallback_search, execute_semantic_search,
+    check_lancedb_health, create_scalar_index, create_vector_index, execute_fallback_search,
+    execute_semantic_search,
 };
 use rust_enterprise_query_engine::pipelines::ingest::execute_ingestion;
 use std::io::Write;
@@ -203,4 +204,32 @@ async fn test_check_lancedb_health() {
         .await
         .expect("Health check failed");
     assert_eq!(total_records, 2, "LanceDB health check reported wrong row count");
+}
+
+#[tokio::test]
+async fn test_create_scalar_index_on_kunnr() {
+    let db_dir = tempdir().unwrap();
+    let db_uri = db_dir.path().to_str().unwrap();
+    let mut dummy_csv = NamedTempFile::new().unwrap();
+    writeln!(dummy_csv, "kunnr,name1,ort01,land1\nIDX01,Alpha,Berlin,DE\nIDX02,Beta,Munich,DE").unwrap();
+    let (model, tokenizer) = load_model().await.expect("Failed to load model");
+    execute_ingestion(dummy_csv.path().to_str().unwrap(), db_uri, false, 2, model, tokenizer).await.unwrap();
+    let vector_db = lancedb::connect(db_uri).execute().await.unwrap();
+    let table = vector_db.open_table("customers").execute().await.unwrap();
+    let res = create_scalar_index(&table, "kunnr").await;
+    assert!(res.is_ok(), "Creating scalar index failed");
+}
+
+#[tokio::test]
+async fn test_create_vector_index_on_table() {
+    let db_dir = tempdir().unwrap();
+    let db_uri = db_dir.path().to_str().unwrap();
+    let mut dummy_csv = NamedTempFile::new().unwrap();
+    writeln!(dummy_csv, "kunnr,name1,ort01,land1\nVEC01,Alpha,Berlin,DE\nVEC02,Beta,Munich,DE").unwrap();
+    let (model, tokenizer) = load_model().await.expect("Failed to load model");
+    execute_ingestion(dummy_csv.path().to_str().unwrap(), db_uri, false, 2, model, tokenizer).await.unwrap();
+    let vector_db = lancedb::connect(db_uri).execute().await.unwrap();
+    let table = vector_db.open_table("customers").execute().await.unwrap();
+    let res = create_vector_index(&table, "vector").await;
+    assert!(res.is_ok(), "Creating vector index failed: {:?}", res.err());
 }

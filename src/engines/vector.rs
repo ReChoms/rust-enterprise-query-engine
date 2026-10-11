@@ -102,7 +102,14 @@ pub async fn execute_semantic_search(
     info!("Embedding search query...");
     let embeddings = get_embeddings(vec![query.to_string()], tokenizer, model).await?;
     let query_vector = embeddings.into_iter().next().ok_or_else(|| anyhow!("Failed to generate embedding"))?;
+    execute_semantic_search_vector(query_vector, db_uri, filters).await
+}
 
+pub async fn execute_semantic_search_vector(
+    query_vector: Vec<f32>,
+    db_uri: &str,
+    filters: &[String],
+) -> Result<HashMap<String, Arc<str>>> {
     info!("Connecting to LanceDB...");
     let vector_db = lancedb::connect(db_uri).execute().await?;
     let target_table = vector_db.open_table("customers").execute().await?;
@@ -163,6 +170,34 @@ pub async fn check_lancedb_health(db_uri: &str) -> Result<usize> {
     let target_table = vector_db.open_table("customers").execute().await?;
     let total_rows = target_table.count_rows(None).await?;
     Ok(total_rows)
+}
+
+pub async fn is_vector_indexed(db_uri: &str) -> Result<bool> {
+    let vector_db = lancedb::connect(db_uri).execute().await?;
+    let target_table = vector_db.open_table("customers").execute().await?;
+    let indices = target_table.list_indices().await?;
+    Ok(indices.iter().any(|idx| idx.columns.iter().any(|c| c == "vector")))
+}
+
+pub async fn create_scalar_index(table: &lancedb::Table, column: &str) -> Result<()> {
+    table
+        .create_index(&[column], lancedb::index::Index::BTree(lancedb::index::scalar::BTreeIndexBuilder::default()))
+        .execute()
+        .await?;
+    Ok(())
+}
+
+pub async fn create_vector_index(table: &lancedb::Table, column: &str) -> Result<()> {
+    let rows = table.count_rows(None).await?;
+    if rows < 256 {
+        info!("Skipping vector index on '{}': table has {} rows (IVF-PQ requires >= 256)", column, rows);
+        return Ok(());
+    }
+    table
+        .create_index(&[column], lancedb::index::Index::Auto)
+        .execute()
+        .await?;
+    Ok(())
 }
 
 #[cfg(test)]
