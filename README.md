@@ -43,6 +43,11 @@ The codebase enforces strict unidirectional dependency flow across 4 altitudes:
 * **Altitude 1: `engines/` (The Bedrock / Hermetic Compute)**: DataFusion SQL engine, LanceDB vector kNN search, Candle BERT embeddings, and SQL AST mutation guards.
 * **Altitude 0: `common/` (The Ground / Primitives)**: Zero-dependency domain models, serialized request/response DTOs, and telemetry initialization.
 
+### 5. Two-Tier Semantic Caching & Indexing
+* **Two-Tier Cache Bypass**: Tier 1 checks exact queries in $<1\mu\text{s}$; Tier 2 tests vector cosine similarity ($\ge 0.95$), skipping LanceDB and LLM inference.
+* **Bounded Zero-Copy Storage**: Thread-safe `SemanticCache` storing wire bytes (`Box<[u8]>`) with LRU eviction bounded by `SEMANTIC_CACHE_CAPACITY` (<2 MB RAM).
+* **Database Indexing**: Ingestion automatically creates B-Tree scalar indexes on keys and IVF-PQ vector indexes with a $\ge 256$ row threshold guard.
+
 ---
 
 ## Usage Guide
