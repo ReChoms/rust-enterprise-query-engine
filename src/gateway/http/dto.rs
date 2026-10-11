@@ -22,6 +22,8 @@ pub struct HealthResponse {
     pub llm_connected: bool,
     pub vector_db_connected: bool,
     pub total_records: usize,
+    pub vector_indexed: bool,
+    pub cache_entries: usize,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]

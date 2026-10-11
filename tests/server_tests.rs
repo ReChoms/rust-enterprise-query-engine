@@ -17,13 +17,13 @@ async fn test_http_health_endpoint() {
     let sql_engine = init_datafusion().await.expect("Failed to init DataFusion");
     let llm_client = OllamaClient::init_from_env_or_default().expect("Failed init client");
 
-    let state = AppState {
-        llm_client: Arc::new(llm_client),
-        sql_engine: Arc::new(sql_engine),
-        embedding_model: Arc::clone(&model),
-        tokenizer: Arc::clone(&tokenizer),
-        vector_db_uri: "data/sap_vectors".to_string(),
-    };
+    let state = AppState::new(
+        Arc::new(llm_client),
+        Arc::new(sql_engine),
+        Arc::clone(&model),
+        Arc::clone(&tokenizer),
+        "data/sap_vectors".to_string(),
+    );
 
     let app = create_router(state);
     let response = app
@@ -43,13 +43,13 @@ async fn test_http_sql_query_endpoint() {
     let sql_engine = init_datafusion().await.expect("Failed to init DataFusion");
     let llm_client = OllamaClient::init_from_env_or_default().expect("Failed init client");
 
-    let state = AppState {
-        llm_client: Arc::new(llm_client),
-        sql_engine: Arc::new(sql_engine),
-        embedding_model: Arc::clone(&model),
-        tokenizer: Arc::clone(&tokenizer),
-        vector_db_uri: "data/sap_vectors".to_string(),
-    };
+    let state = AppState::new(
+        Arc::new(llm_client),
+        Arc::new(sql_engine),
+        Arc::clone(&model),
+        Arc::clone(&tokenizer),
+        "data/sap_vectors".to_string(),
+    );
 
     let app = create_router(state);
     let req_body = serde_json::json!({
@@ -83,13 +83,13 @@ async fn test_http_sql_query_injection_blocked() {
     let sql_engine = init_datafusion().await.expect("Failed to init DataFusion");
     let llm_client = OllamaClient::init_from_env_or_default().expect("Failed init client");
 
-    let state = AppState {
-        llm_client: Arc::new(llm_client),
-        sql_engine: Arc::new(sql_engine),
-        embedding_model: Arc::clone(&model),
-        tokenizer: Arc::clone(&tokenizer),
-        vector_db_uri: "data/sap_vectors".to_string(),
-    };
+    let state = AppState::new(
+        Arc::new(llm_client),
+        Arc::new(sql_engine),
+        Arc::clone(&model),
+        Arc::clone(&tokenizer),
+        "data/sap_vectors".to_string(),
+    );
 
     let app = create_router(state);
     let req_body = serde_json::json!({

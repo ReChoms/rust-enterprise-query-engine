@@ -19,6 +19,9 @@ pub async fn health_handler(State(state): State<AppState>) -> (StatusCode, Json<
         Ok(count) => (true, count),
         Err(_) => (false, 0),
     };
+    let vector_indexed = crate::engines::vector::is_vector_indexed(&state.vector_db_uri)
+        .await
+        .unwrap_or(false);
 
     let (status, code) = if llm_online && vector_db_connected {
         ("healthy".to_string(), StatusCode::OK)
@@ -33,6 +36,8 @@ pub async fn health_handler(State(state): State<AppState>) -> (StatusCode, Json<
         llm_connected: llm_online,
         vector_db_connected,
         total_records,
+        vector_indexed,
+        cache_entries: state.semantic_cache.len(),
     };
 
     (code, Json(report))

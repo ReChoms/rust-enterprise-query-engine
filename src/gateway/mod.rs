@@ -59,13 +59,13 @@ pub async fn run() -> Result<()> {
             info!(">>> Executing ASK-SEMANTIC command");
             info!("Loading embedding model (BAAI/bge-base-en-v1.5)...");
             let (model, tokenizer) = load_model().await?;
-            let state = AppState {
-                llm_client: Arc::new(llm_client),
-                sql_engine: Arc::new(SessionContext::new()),
-                embedding_model: model,
+            let state = AppState::new(
+                Arc::new(llm_client),
+                Arc::new(SessionContext::new()),
+                model,
                 tokenizer,
                 vector_db_uri,
-            };
+            );
             let queries = resolve_query_inputs(query)?;
             for q_res in queries {
                 let q = q_res?;
@@ -113,13 +113,13 @@ pub async fn run() -> Result<()> {
                                 model_bundle = Some(load_model().await?);
                             }
                             if let Some((model, tokenizer)) = model_bundle.as_ref() {
-                                let state = AppState {
-                                    llm_client: Arc::new(llm_client.clone()),
-                                    sql_engine: Arc::new(SessionContext::new()),
-                                    embedding_model: Arc::clone(model),
-                                    tokenizer: Arc::clone(tokenizer),
-                                    vector_db_uri: vector_db_uri.clone(),
-                                };
+                                let state = AppState::new(
+                                    Arc::new(llm_client.clone()),
+                                    Arc::new(SessionContext::new()),
+                                    Arc::clone(model),
+                                    Arc::clone(tokenizer),
+                                    vector_db_uri.clone(),
+                                );
                                 let res = run_semantic_pipeline(&state, &q).await?;
                                 println!("{}", serde_json::to_string(&res)?);
                             }
@@ -135,13 +135,13 @@ pub async fn run() -> Result<()> {
                             model_bundle = Some(load_model().await?);
                         }
                         if let Some((model, tokenizer)) = model_bundle.as_ref() {
-                            let state = AppState {
-                                llm_client: Arc::new(llm_client.clone()),
-                                sql_engine: Arc::new(SessionContext::new()),
-                                embedding_model: Arc::clone(model),
-                                tokenizer: Arc::clone(tokenizer),
-                                vector_db_uri: vector_db_uri.clone(),
-                            };
+                            let state = AppState::new(
+                                Arc::new(llm_client.clone()),
+                                Arc::new(SessionContext::new()),
+                                Arc::clone(model),
+                                Arc::clone(tokenizer),
+                                vector_db_uri.clone(),
+                            );
                             let res = run_semantic_pipeline(&state, &q).await?;
                             println!("{}", serde_json::to_string(&res)?);
                         }
@@ -180,6 +180,9 @@ pub async fn run() -> Result<()> {
                 Ok(count) => (true, count),
                 Err(_) => (false, 0),
             };
+            let vector_indexed = crate::engines::vector::is_vector_indexed(&vector_db_uri)
+                .await
+                .unwrap_or(false);
 
             let status = if llm_online && vector_db_connected {
                 "healthy".to_string()
@@ -194,6 +197,8 @@ pub async fn run() -> Result<()> {
                 llm_connected: llm_online,
                 vector_db_connected,
                 total_records,
+                vector_indexed,
+                cache_entries: 0,
             };
 
             println!("{}", serde_json::to_string(&report)?);
@@ -210,13 +215,13 @@ pub async fn run() -> Result<()> {
             let (model, tokenizer) = load_model().await?;
             let sql_engine = init_datafusion().await?;
             info!("Connecting to LanceDB vector storage at '{}'...", vector_db_uri);
-            let state = AppState {
-                llm_client: Arc::new(llm_client),
-                sql_engine: Arc::new(sql_engine),
-                embedding_model: model,
+            let state = AppState::new(
+                Arc::new(llm_client),
+                Arc::new(sql_engine),
+                model,
                 tokenizer,
                 vector_db_uri,
-            };
+            );
             start_dual_server(state, http_addr, grpc_addr).await?;
         }
     }

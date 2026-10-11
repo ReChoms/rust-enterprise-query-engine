@@ -20,7 +20,7 @@ use tracing::{info, warn};
 
 use crate::common::types::{DegradedChunk, DegradedResponse, ParsedQuestion, SemanticResponse, SqlResponse};
 use crate::engines::sql::execute_sql_query;
-use crate::engines::vector::{execute_fallback_search, execute_semantic_search};
+use crate::engines::vector::execute_fallback_search;
 
 pub use firewall::{parse_llm_json, verify_and_parse_llm_generation};
 pub use intent::parse_question_intent;
@@ -39,6 +39,28 @@ pub struct AppState {
     pub embedding_model: Arc<BertModel>,
     pub tokenizer: Arc<Tokenizer>,
     pub vector_db_uri: String,
+    pub semantic_cache: Arc<crate::engines::SemanticCache>,
+}
+
+impl AppState {
+    pub fn new(
+        llm_client: Arc<OllamaClient>,
+        sql_engine: Arc<SessionContext>,
+        embedding_model: Arc<BertModel>,
+        tokenizer: Arc<Tokenizer>,
+        vector_db_uri: String,
+    ) -> Self {
+        let capacity = std::env::var("SEMANTIC_CACHE_CAPACITY").ok().and_then(|v| v.parse().ok()).unwrap_or(1_024);
+        let threshold = std::env::var("SEMANTIC_CACHE_THRESHOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(0.95);
+        Self {
+            llm_client,
+            sql_engine,
+            embedding_model,
+            tokenizer,
+            vector_db_uri,
+            semantic_cache: Arc::new(crate::engines::SemanticCache::new(capacity, threshold)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +118,13 @@ pub async fn run_sql_pipeline(state: &AppState, query: &str) -> Result<Vec<Recor
 /// Unified Semantic Query Pipeline (shared between CLI and HTTP gateway).
 /// Eliminates the duplicated orchestration logic.
 pub async fn run_semantic_pipeline(state: &AppState, query: &str) -> Result<SemanticQueryResult> {
+    if let Some(cached_bytes) = state.semantic_cache.get_exact(query) {
+        info!("Semantic Cache HIT (Tier 1: Exact match) for query: '{}'", query);
+        if let Ok(res) = serde_json::from_slice::<SemanticQueryResult>(&cached_bytes) {
+            return Ok(res);
+        }
+    }
+
     info!("Parsing raw query to separate semantic intent from exact filters...");
     let parser_prompt = build_question_parser_prompt(query);
     let parsed_query = match state.llm_client.prompt_model(&parser_prompt).await {
@@ -114,14 +143,25 @@ pub async fn run_semantic_pipeline(state: &AppState, query: &str) -> Result<Sema
         }
     };
 
-    let chunks = execute_semantic_search(
-        &parsed_query.intent,
+    let embeddings = crate::engines::embeddings::get_embeddings(
+        vec![parsed_query.intent.clone()],
+        Arc::clone(&state.tokenizer),
+        Arc::clone(&state.embedding_model),
+    ).await?;
+    let query_vector = embeddings.into_iter().next().ok_or_else(|| anyhow::anyhow!("Failed to generate embedding"))?;
+
+    if let Some(cached_bytes) = state.semantic_cache.get_similar(&query_vector) {
+        info!("Semantic Cache HIT (Tier 2: Vector similarity match) for query: '{}'", query);
+        if let Ok(res) = serde_json::from_slice::<SemanticQueryResult>(&cached_bytes) {
+            return Ok(res);
+        }
+    }
+
+    let chunks = crate::engines::vector::execute_semantic_search_vector(
+        query_vector.clone(),
         &state.vector_db_uri,
         &parsed_query.filters,
-        Arc::clone(&state.embedding_model),
-        Arc::clone(&state.tokenizer),
-    )
-    .await?;
+    ).await?;
 
     info!("Passing retrieved chunks to LLM for deterministic generation...");
     let semantic_prompt = build_semantic_prompt(query, &chunks);
@@ -144,7 +184,15 @@ pub async fn run_semantic_pipeline(state: &AppState, query: &str) -> Result<Sema
                 }
             }
 
-            Ok(SemanticQueryResult::Verified(final_payload))
+            let verified_res = SemanticQueryResult::Verified(final_payload);
+            if let Ok(bytes) = serde_json::to_vec(&verified_res) {
+                state.semantic_cache.insert(
+                    query.to_string(),
+                    query_vector.into_boxed_slice(),
+                    bytes.into_boxed_slice(),
+                );
+            }
+            Ok(verified_res)
         }
         Err(err) => {
             warn!("LLM generation offline ({}). Returning raw vector chunks (degraded mode).", err);
