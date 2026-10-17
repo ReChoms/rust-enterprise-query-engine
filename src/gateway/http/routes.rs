@@ -78,6 +78,7 @@ fn validate_query_str<'a>(
 /// we stream Arrow records directly into a single contiguous byte buffer (`axum::body::Bytes`)
 /// framed as a JSON array (`[...]`). This achieves O(1) allocation, optimal L1/L2 cache prefetching,
 /// and microsecond dispatch directly into the kernel's `SO_SNDBUF`.
+#[tracing::instrument(name = "http_sql_query", skip(state, payload), fields(query = %payload.query))]
 pub async fn sql_query_handler(
     State(state): State<AppState>,
     Json(payload): Json<SqlQueryRequest>,
@@ -133,6 +134,7 @@ pub async fn sql_query_handler(
         .into_response())
 }
 
+#[tracing::instrument(name = "http_semantic_query", skip(state, payload), fields(query = %payload.query))]
 pub async fn semantic_query_handler(
     State(state): State<AppState>,
     Json(payload): Json<QueryRequest>,

@@ -41,6 +41,7 @@ impl QueryService for QueryServiceImpl {
         }))
     }
 
+    #[tracing::instrument(name = "grpc_execute_sql", skip(self, req))]
     async fn execute_sql(
         &self,
         req: Request<SqlQueryRequest>,
@@ -71,11 +72,12 @@ impl QueryService for QueryServiceImpl {
         let row_count = batches.iter().map(|b| b.num_rows()).sum::<usize>() as u32;
 
         Ok(Response::new(SqlQueryResponse {
-            json_lines: raw_lines.into(),
+            json_lines: raw_lines,
             row_count,
         }))
     }
 
+    #[tracing::instrument(name = "grpc_execute_semantic", skip(self, req))]
     async fn execute_semantic(
         &self,
         req: Request<SemanticQueryRequest>,

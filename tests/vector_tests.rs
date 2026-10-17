@@ -233,3 +233,26 @@ async fn test_create_vector_index_on_table() {
     let res = create_vector_index(&table, "vector").await;
     assert!(res.is_ok(), "Creating vector index failed: {:?}", res.err());
 }
+
+#[tokio::test]
+async fn test_hybrid_search_fusion() {
+    let db_dir = tempdir().unwrap();
+    let db_uri = db_dir.path().to_str().unwrap();
+    let mut dummy_csv = NamedTempFile::new().unwrap();
+    writeln!(dummy_csv, "kunnr,name1,ort01,land1\nHYB01,Alpha Tech,Berlin,DE\nHYB02,Beta Bakery,Munich,DE").unwrap();
+    let (model, tokenizer) = load_model().await.expect("Failed to load model");
+    execute_ingestion(dummy_csv.path().to_str().unwrap(), db_uri, false, 2, Arc::clone(&model), Arc::clone(&tokenizer)).await.unwrap();
+    let query_vec = rust_enterprise_query_engine::engines::embeddings::get_embeddings(
+        vec!["technology".to_string()],
+        Arc::clone(&tokenizer),
+        Arc::clone(&model),
+    ).await.unwrap().remove(0);
+    let filters = vec!["Berlin".to_string()];
+    let res = rust_enterprise_query_engine::engines::vector::execute_hybrid_search(
+        query_vec,
+        db_uri,
+        &filters,
+    ).await.unwrap();
+    assert_eq!(res[0].0, "HYB01", "Dual-match HYB01 must rank first");
+    assert_eq!(res[1].0, "HYB02", "Single-match HYB02 must rank second");
+}

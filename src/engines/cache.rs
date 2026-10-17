@@ -61,6 +61,7 @@ impl SemanticCache {
         entries.push(CacheEntry { query, embedding, response, last_accessed: Instant::now() });
     }
     pub fn len(&self) -> usize { self.entries.read().map(|e| e.len()).unwrap_or(0) }
+    pub fn is_empty(&self) -> bool { self.len() == 0 }
 }
 
 #[cfg(test)]

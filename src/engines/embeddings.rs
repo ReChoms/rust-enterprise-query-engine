@@ -137,6 +137,7 @@ fn normalize_vector_slice(slice: &mut [f32]) {
 }
 
 /// Generates normalized dense vector embeddings in a contiguous flat buffer (Cloudflare zero-copy format).
+#[tracing::instrument(name = "engine_candle_embeddings", skip(tokenizer, model), fields(batch_size = sentences.len()))]
 pub async fn get_embeddings_batch(
     sentences: Vec<String>,
     tokenizer: Arc<Tokenizer>,

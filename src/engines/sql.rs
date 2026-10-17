@@ -20,6 +20,7 @@ pub async fn init_datafusion() -> Result<SessionContext> {
 }
 
 /// Executes a SQL query against DataFusion after passing it through the AST security firewall.
+#[tracing::instrument(name = "engine_datafusion_sql", skip(sql_engine))]
 pub async fn execute_sql_query(sql_engine: &SessionContext, query: &str) -> Result<Vec<RecordBatch>> {
     info!("Validating SQL query safety via AST parser...");
     validate_sql_is_safe(query)?;

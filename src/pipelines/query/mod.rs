@@ -78,6 +78,7 @@ pub enum QueryOutput {
 }
 
 /// Dynamic Intent Router Pipeline: classifies query into SQL vs Semantic and dispatches.
+#[tracing::instrument(name = "pipeline_query_dispatch", skip(state))]
 pub async fn run_query_pipeline(state: &AppState, query: &str) -> Result<QueryOutput> {
     let decision = classify_intent(&state.llm_client, query).await?;
     match decision.route.to_uppercase().as_str() {
@@ -94,6 +95,7 @@ pub async fn run_query_pipeline(state: &AppState, query: &str) -> Result<QueryOu
 }
 
 /// Executes natural language to SQL generation and AST-validated DataFusion execution directly.
+#[tracing::instrument(name = "pipeline_sql_query", skip(llm, sql_engine))]
 pub async fn run_sql_query(
     llm: &OllamaClient,
     sql_engine: &SessionContext,
@@ -117,6 +119,7 @@ pub async fn run_sql_pipeline(state: &AppState, query: &str) -> Result<Vec<Recor
 
 /// Unified Semantic Query Pipeline (shared between CLI and HTTP gateway).
 /// Eliminates the duplicated orchestration logic.
+#[tracing::instrument(name = "pipeline_semantic_query", skip(state))]
 pub async fn run_semantic_pipeline(state: &AppState, query: &str) -> Result<SemanticQueryResult> {
     if let Some(cached_bytes) = state.semantic_cache.get_exact(query) {
         info!("Semantic Cache HIT (Tier 1: Exact match) for query: '{}'", query);

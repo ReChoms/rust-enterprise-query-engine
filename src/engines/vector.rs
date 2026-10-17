@@ -66,7 +66,8 @@ pub async fn insert_batch(
 async fn extract_chunks_from_stream(
     mut stream: lancedb::arrow::SendableRecordBatchStream,
     retrieved_chunks: &mut HashMap<String, Arc<str>>,
-) -> Result<()> {
+) -> Result<Vec<String>> {
+    let mut ids = Vec::new();
     while let Some(result) = stream.next().await {
         let batch = result?;
 
@@ -85,11 +86,12 @@ async fn extract_chunks_from_stream(
                     "name": name,
                     "city": city
                 }).to_string();
+                ids.push(kunnr.clone());
                 retrieved_chunks.insert(kunnr, Arc::from(chunk_json));
             }
         }
     }
-    Ok(())
+    Ok(ids)
 }
 
 pub async fn execute_semantic_search(
@@ -105,11 +107,12 @@ pub async fn execute_semantic_search(
     execute_semantic_search_vector(query_vector, db_uri, filters).await
 }
 
-pub async fn execute_semantic_search_vector(
+#[tracing::instrument(name = "engine_lancedb_hybrid_search", skip(query_vector))]
+pub async fn execute_hybrid_search(
     query_vector: Vec<f32>,
     db_uri: &str,
     filters: &[String],
-) -> Result<HashMap<String, Arc<str>>> {
+) -> Result<Vec<(String, Arc<str>)>> {
     info!("Connecting to LanceDB...");
     let vector_db = lancedb::connect(db_uri).execute().await?;
     let target_table = vector_db.open_table("customers").execute().await?;
@@ -118,9 +121,10 @@ pub async fn execute_semantic_search_vector(
 
     info!("Executing semantic search (Fuzzy Pass)...");
     let vector_stream = target_table.query().nearest_to(query_vector)?.limit(5).execute().await?;
-    extract_chunks_from_stream(vector_stream, &mut retrieved_chunks).await?;
+    let dense_ids = extract_chunks_from_stream(vector_stream, &mut retrieved_chunks).await?;
 
     info!("Executing exact keyword search (Deterministic Pass)...");
+    let mut lexical_ids = Vec::new();
     for filter in filters {
         let is_not = filter.starts_with("NOT ");
         let term = if is_not { filter.strip_prefix("NOT ").unwrap_or(filter.as_str()) } else { filter.as_str() };
@@ -130,11 +134,30 @@ pub async fn execute_semantic_search_vector(
         } else {
             let sql = format!("sentence LIKE '%{}%'", term);
             let exact_stream = target_table.query().only_if(sql).limit(5).execute().await?;
-            extract_chunks_from_stream(exact_stream, &mut retrieved_chunks).await?;
+            let mut ids = extract_chunks_from_stream(exact_stream, &mut retrieved_chunks).await?;
+            lexical_ids.append(&mut ids);
         }
     }
 
-    Ok(retrieved_chunks)
+    let dense_refs: Vec<&str> = dense_ids.iter().map(|s| s.as_str()).collect();
+    let lexical_refs: Vec<&str> = lexical_ids.iter().map(|s| s.as_str()).collect();
+    let fused = crate::engines::rank_fusion::fuse_ranked_candidates(&dense_refs, &lexical_refs, 60.0);
+    let mut ordered = Vec::new();
+    for (id, _) in fused.into_iter().take(5) {
+        if let Some(chunk) = retrieved_chunks.remove(&id) {
+            ordered.push((id, chunk));
+        }
+    }
+    Ok(ordered)
+}
+
+pub async fn execute_semantic_search_vector(
+    query_vector: Vec<f32>,
+    db_uri: &str,
+    filters: &[String],
+) -> Result<HashMap<String, Arc<str>>> {
+    let ordered = execute_hybrid_search(query_vector, db_uri, filters).await?;
+    Ok(ordered.into_iter().collect())
 }
 
 pub fn build_fallback_sql(intent: &str) -> String {
