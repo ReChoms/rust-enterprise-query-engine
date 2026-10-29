@@ -7,6 +7,7 @@ pub mod ast_guard;
 pub mod cache;
 pub mod embeddings;
 pub mod rank_fusion;
+pub mod rerank;
 pub mod sql;
 pub mod vector;
 

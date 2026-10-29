@@ -120,7 +120,7 @@ pub async fn execute_hybrid_search(
     let mut retrieved_chunks = HashMap::new();
 
     info!("Executing semantic search (Fuzzy Pass)...");
-    let vector_stream = target_table.query().nearest_to(query_vector)?.limit(5).execute().await?;
+    let vector_stream = target_table.query().nearest_to(query_vector)?.limit(20).execute().await?;
     let dense_ids = extract_chunks_from_stream(vector_stream, &mut retrieved_chunks).await?;
 
     info!("Executing exact keyword search (Deterministic Pass)...");
@@ -132,8 +132,8 @@ pub async fn execute_hybrid_search(
         if is_not {
             retrieved_chunks.retain(|_, v| !v.contains(term));
         } else {
-            let sql = format!("sentence LIKE '%{}%'", term);
-            let exact_stream = target_table.query().only_if(sql).limit(5).execute().await?;
+            let sql = format!("sentence LIKE '%{}%'", term.replace('\'', "''"));
+            let exact_stream = target_table.query().only_if(sql).limit(20).execute().await?;
             let mut ids = extract_chunks_from_stream(exact_stream, &mut retrieved_chunks).await?;
             lexical_ids.append(&mut ids);
         }
@@ -143,7 +143,7 @@ pub async fn execute_hybrid_search(
     let lexical_refs: Vec<&str> = lexical_ids.iter().map(|s| s.as_str()).collect();
     let fused = crate::engines::rank_fusion::fuse_ranked_candidates(&dense_refs, &lexical_refs, 60.0);
     let mut ordered = Vec::new();
-    for (id, _) in fused.into_iter().take(5) {
+    for (id, _) in fused.into_iter().take(20) {
         if let Some(chunk) = retrieved_chunks.remove(&id) {
             ordered.push((id, chunk));
         }

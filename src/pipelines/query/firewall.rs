@@ -1,6 +1,5 @@
 use anyhow::{anyhow, bail, Result};
 use serde::de::DeserializeOwned;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::common::types::SemanticResponse;
@@ -36,13 +35,14 @@ pub fn parse_llm_json<T: DeserializeOwned>(raw_output: &str) -> Result<T> {
 /// made by the LLM contains a verifiable, verbatim substring quote from retrieved chunks.
 pub fn verify_and_parse_llm_generation(
     raw_output: &str,
-    retrieved_chunks: &HashMap<String, Arc<str>>,
+    retrieved_chunks: &[(String, Arc<str>)],
 ) -> Result<SemanticResponse> {
     let response: SemanticResponse = parse_llm_json(raw_output)?;
 
     if response.answer_found {
-        let source_text = retrieved_chunks
-            .get(&response.source_chunk_id)
+        let (_, source_text) = retrieved_chunks
+            .iter()
+            .find(|(id, _)| id == &response.source_chunk_id)
             .ok_or_else(|| {
                 anyhow!(
                     "SECURITY VIOLATION: LLM cited a non-existent chunk ID: {}",
@@ -96,11 +96,7 @@ mod tests {
 
     #[test]
     fn test_verify_valid_generation() {
-        let mut chunks = HashMap::new();
-        chunks.insert(
-            "chunk_1".to_string(),
-            Arc::from("The customer is Acme Corp in Berlin."),
-        );
+        let chunks = [("chunk_1".to_string(), Arc::from("The customer is Acme Corp in Berlin."))];
 
         let raw = r#"{
             "answer_found": true,
@@ -115,11 +111,7 @@ mod tests {
 
     #[test]
     fn test_verify_hallucinated_quote_blocked() {
-        let mut chunks = HashMap::new();
-        chunks.insert(
-            "chunk_1".to_string(),
-            Arc::from("The customer is Acme Corp in Berlin."),
-        );
+        let chunks = [("chunk_1".to_string(), Arc::from("The customer is Acme Corp in Berlin."))];
 
         let raw = r#"{
             "answer_found": true,
@@ -138,11 +130,7 @@ mod tests {
 
     #[test]
     fn test_verify_fake_chunk_id_blocked() {
-        let mut chunks = HashMap::new();
-        chunks.insert(
-            "chunk_1".to_string(),
-            Arc::from("The customer is Acme Corp in Berlin."),
-        );
+        let chunks = [("chunk_1".to_string(), Arc::from("The customer is Acme Corp in Berlin."))];
 
         let raw = r#"{
             "answer_found": true,
@@ -161,7 +149,7 @@ mod tests {
 
     #[test]
     fn test_verify_answer_not_found_passes() {
-        let chunks = HashMap::new();
+        let chunks: [(String, Arc<str>); 0] = [];
         let raw = r#"{
             "answer_found": false,
             "answer": "",

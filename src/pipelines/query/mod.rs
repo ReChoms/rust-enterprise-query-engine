@@ -117,6 +117,25 @@ pub async fn run_sql_pipeline(state: &AppState, query: &str) -> Result<Vec<Recor
     run_sql_query(&state.llm_client, &state.sql_engine, query).await
 }
 
+fn build_degraded_response(
+    chunks: impl IntoIterator<Item = (String, Arc<str>)>,
+    err: impl std::fmt::Display,
+) -> SemanticQueryResult {
+    warn!("LLM generation offline ({}). Returning raw vector chunks (degraded mode).", err);
+    let degraded_chunks = chunks
+        .into_iter()
+        .map(|(chunk_id, content)| DegradedChunk {
+            chunk_id,
+            content: content.to_string(),
+        })
+        .collect();
+    SemanticQueryResult::Degraded(DegradedResponse {
+        degraded: true,
+        message: format!("LLM is offline or timed out: {}", err),
+        retrieved_chunks: degraded_chunks,
+    })
+}
+
 /// Unified Semantic Query Pipeline (shared between CLI and HTTP gateway).
 /// Eliminates the duplicated orchestration logic.
 #[tracing::instrument(name = "pipeline_semantic_query", skip(state))]
@@ -167,51 +186,38 @@ pub async fn run_semantic_pipeline(state: &AppState, query: &str) -> Result<Sema
     ).await?;
 
     info!("Passing retrieved chunks to LLM for deterministic generation...");
-    let semantic_prompt = build_semantic_prompt(query, &chunks);
-    match state.llm_client.prompt_model(&semantic_prompt).await {
-        Ok(raw_llm_output) => {
-            let mut final_payload = verify_and_parse_llm_generation(&raw_llm_output, &chunks)?;
+    let prompt_chunks: Vec<_> = chunks.iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect();
+    let semantic_prompt = build_semantic_prompt(query, &prompt_chunks);
+    let raw_llm_output = match state.llm_client.prompt_model(&semantic_prompt).await {
+        Ok(raw) => raw,
+        Err(err) => return Ok(build_degraded_response(chunks, err)),
+    };
 
-            if !final_payload.answer_found {
-                info!("Vector search failed. Triggering deterministic fallback (Absence Proof)...");
-                let fallback_chunks = execute_fallback_search(&parsed_query.intent, &state.vector_db_uri).await?;
+    let mut final_payload = verify_and_parse_llm_generation(&raw_llm_output, &prompt_chunks)?;
 
-                if !fallback_chunks.is_empty() {
-                    info!("Fallback search found missing chunks. Re-querying LLM...");
-                    let fallback_prompt = build_semantic_prompt(query, &fallback_chunks);
-                    if let Ok(raw_fallback_output) = state.llm_client.prompt_model(&fallback_prompt).await {
-                        final_payload = verify_and_parse_llm_generation(&raw_fallback_output, &fallback_chunks)?;
-                    }
-                } else {
-                    info!("Absence mathematically proven. The data does not exist in the corpus.");
-                }
+    if !final_payload.answer_found {
+        info!("Vector search failed. Triggering deterministic fallback (Absence Proof)...");
+        let fallback_chunks = execute_fallback_search(&parsed_query.intent, &state.vector_db_uri).await?;
+
+        if !fallback_chunks.is_empty() {
+            info!("Fallback search found missing chunks. Re-querying LLM...");
+            let fb_chunks: Vec<_> = fallback_chunks.iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect();
+            let fallback_prompt = build_semantic_prompt(query, &fb_chunks);
+            if let Ok(raw_fallback_output) = state.llm_client.prompt_model(&fallback_prompt).await {
+                final_payload = verify_and_parse_llm_generation(&raw_fallback_output, &fb_chunks)?;
             }
-
-            let verified_res = SemanticQueryResult::Verified(final_payload);
-            if let Ok(bytes) = serde_json::to_vec(&verified_res) {
-                state.semantic_cache.insert(
-                    query.to_string(),
-                    query_vector.into_boxed_slice(),
-                    bytes.into_boxed_slice(),
-                );
-            }
-            Ok(verified_res)
-        }
-        Err(err) => {
-            warn!("LLM generation offline ({}). Returning raw vector chunks (degraded mode).", err);
-            let degraded_chunks = chunks
-                .into_iter()
-                .map(|(chunk_id, content)| DegradedChunk {
-                    chunk_id,
-                    content: content.to_string(),
-                })
-                .collect();
-            let degraded_payload = DegradedResponse {
-                degraded: true,
-                message: format!("LLM is offline or timed out: {}", err),
-                retrieved_chunks: degraded_chunks,
-            };
-            Ok(SemanticQueryResult::Degraded(degraded_payload))
+        } else {
+            info!("Absence mathematically proven. The data does not exist in the corpus.");
         }
     }
+
+    let verified_res = SemanticQueryResult::Verified(final_payload);
+    if let Ok(bytes) = serde_json::to_vec(&verified_res) {
+        state.semantic_cache.insert(
+            query.to_string(),
+            query_vector.into_boxed_slice(),
+            bytes.into_boxed_slice(),
+        );
+    }
+    Ok(verified_res)
 }

@@ -256,3 +256,27 @@ async fn test_hybrid_search_fusion() {
     assert_eq!(res[0].0, "HYB01", "Dual-match HYB01 must rank first");
     assert_eq!(res[1].0, "HYB02", "Single-match HYB02 must rank second");
 }
+
+#[tokio::test]
+async fn test_hybrid_search_handles_single_quotes_in_filters() {
+    let db_dir = tempdir().unwrap();
+    let db_uri = db_dir.path().to_str().unwrap();
+    let mut dummy_csv = NamedTempFile::new().unwrap();
+    writeln!(dummy_csv, "kunnr,name1,ort01,land1\nESC01,O'Connor Tech,Dublin,IE").unwrap();
+    let (model, tokenizer) = load_model().await.expect("Failed to load model");
+    execute_ingestion(dummy_csv.path().to_str().unwrap(), db_uri, false, 1, Arc::clone(&model), Arc::clone(&tokenizer)).await.unwrap();
+    let query_vec = rust_enterprise_query_engine::engines::embeddings::get_embeddings(
+        vec!["enterprise".to_string()],
+        Arc::clone(&tokenizer),
+        Arc::clone(&model),
+    ).await.unwrap().remove(0);
+    let filters = vec!["O'Connor".to_string()];
+    let res = rust_enterprise_query_engine::engines::vector::execute_hybrid_search(
+        query_vec,
+        db_uri,
+        &filters,
+    ).await;
+    assert!(res.is_ok(), "Filter with single quote failed: {:?}", res.err());
+    let matches = res.unwrap();
+    assert_eq!(matches[0].0, "ESC01");
+}

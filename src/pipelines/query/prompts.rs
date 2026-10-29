@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 pub const SAP_KNA1_SCHEMA: &str = "\
@@ -24,7 +23,7 @@ pub fn build_sql_prompt(user_question: &str) -> String {
 
 pub fn build_semantic_prompt(
     user_question: &str,
-    chunks: &HashMap<String, Arc<str>>,
+    chunks: &[(String, Arc<str>)],
 ) -> String {
     let mut context = String::new();
     for (id, text) in chunks {
@@ -67,4 +66,21 @@ pub fn build_question_parser_prompt(user_question: &str) -> String {
         User Question: \"{}\"\nA: ",
         user_question
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_semantic_prompt_preserves_slice_order() {
+        let chunks = [
+            ("chunk_1".to_string(), Arc::from("First chunk text")),
+            ("chunk_2".to_string(), Arc::from("Second chunk text")),
+        ];
+        let prompt = build_semantic_prompt("Where is the customer?", &chunks);
+        let pos1 = prompt.find("CHUNK ID: chunk_1").unwrap();
+        let pos2 = prompt.find("CHUNK ID: chunk_2").unwrap();
+        assert!(pos1 < pos2, "Prompt generation inverted chunk rank order");
+    }
 }

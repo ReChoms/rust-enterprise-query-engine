@@ -8,7 +8,6 @@ use rust_enterprise_query_engine::pipelines::query::{
     build_question_parser_prompt, build_routing_prompt, build_semantic_prompt, parse_llm_json,
     verify_and_parse_llm_generation, OllamaClient,
 };
-use std::collections::HashMap;
 use std::io::Write;
 use std::sync::Arc;
 use tempfile::{tempdir, NamedTempFile};
@@ -56,10 +55,8 @@ fn test_intent_parsing_logic() {
 
 #[test]
 fn test_llm_generation_and_verification() {
-    let mut chunks = HashMap::new();
-    chunks.insert("CUST_88".to_string(), Arc::from("Gamma Bakery in Paris"));
-
-    let sem_prompt = build_semantic_prompt("Where is Gamma Bakery?", &chunks);
+    let chunk_slice = [("CUST_88".to_string(), Arc::from("Gamma Bakery in Paris"))];
+    let sem_prompt = build_semantic_prompt("Where is Gamma Bakery?", &chunk_slice);
     assert!(sem_prompt.contains("Gamma Bakery in Paris"));
 
     let valid_json = r#"{
@@ -69,7 +66,7 @@ fn test_llm_generation_and_verification() {
         "source_chunk_id": "CUST_88"
     }"#;
 
-    let payload = verify_and_parse_llm_generation(valid_json, &chunks).unwrap();
+    let payload = verify_and_parse_llm_generation(valid_json, &chunk_slice).unwrap();
     assert!(payload.answer_found);
 
     let hallucinated_json = r#"{
@@ -79,7 +76,7 @@ fn test_llm_generation_and_verification() {
         "source_chunk_id": "CUST_88"
     }"#;
 
-    let rejected = verify_and_parse_llm_generation(hallucinated_json, &chunks);
+    let rejected = verify_and_parse_llm_generation(hallucinated_json, &chunk_slice);
     assert!(rejected.is_err());
     assert!(rejected
         .unwrap_err()
@@ -93,8 +90,7 @@ fn test_mocked_e2e_ask_semantic() {
     let parsed: ParsedQuestion = parse_llm_json(mock_intent_json).unwrap();
     assert_eq!(parsed.intent, "Find Gamma Bakery");
 
-    let mut mock_chunks = HashMap::new();
-    mock_chunks.insert("CUST_88".to_string(), Arc::from("Gamma Bakery in Paris"));
+    let mock_chunks = [("CUST_88".to_string(), Arc::from("Gamma Bakery in Paris"))];
 
     let mock_answer_json = r#"{
         "answer_found": true,
@@ -150,9 +146,10 @@ async fn test_heavy_e2e_ask_semantic_pipeline() {
     .unwrap();
     assert!(!chunks.is_empty(), "E2E Search returned no chunks");
 
-    let semantic_prompt = build_semantic_prompt(query, &chunks);
+    let prompt_chunks: Vec<_> = chunks.iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect();
+    let semantic_prompt = build_semantic_prompt(query, &prompt_chunks);
     let raw_llm_output = client.prompt_model(&semantic_prompt).await.unwrap();
-    let final_payload = verify_and_parse_llm_generation(&raw_llm_output, &chunks).unwrap();
+    let final_payload = verify_and_parse_llm_generation(&raw_llm_output, &prompt_chunks).unwrap();
 
     assert!(
         final_payload.answer_found,
