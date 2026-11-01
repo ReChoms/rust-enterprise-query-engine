@@ -3,11 +3,10 @@ use axum::http::StatusCode;
 use axum::response::Json;
 
 use super::dto::{ErrorResponse, HealthResponse, QueryRequest, SqlQueryRequest};
-use crate::common::types::{RouterDecision, SqlResponse};
-use crate::engines::sql::{execute_sql_query, record_batches_to_json_lines};
+use crate::engines::sql::execute_sql_query;
 use crate::engines::vector::check_lancedb_health;
 use crate::pipelines::query::{
-    build_routing_prompt, build_sql_prompt, parse_llm_json, run_semantic_pipeline, AppState,
+    run_routed_pipeline, run_semantic_pipeline, AppState, RoutedQueryResult,
     SemanticQueryResult,
 };
 
@@ -46,11 +45,8 @@ pub async fn health_handler(State(state): State<AppState>) -> (StatusCode, Json<
 fn validate_query_str<'a>(
     query: &'a str,
     name: &str,
+    max_chars: usize,
 ) -> Result<&'a str, (StatusCode, Json<ErrorResponse>)> {
-    let max_chars = std::env::var("MAX_QUERY_CHARS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(4_096);
     let trimmed = query.trim();
     if trimmed.is_empty() {
         return Err((
@@ -83,7 +79,7 @@ pub async fn sql_query_handler(
     State(state): State<AppState>,
     Json(payload): Json<SqlQueryRequest>,
 ) -> Result<axum::response::Response, (StatusCode, Json<ErrorResponse>)> {
-    let query = validate_query_str(&payload.query, "SQL query")?;
+    let query = validate_query_str(&payload.query, "SQL query", state.max_query_chars())?;
 
     let batches = execute_sql_query(&state.sql_engine, query)
         .await
@@ -139,7 +135,7 @@ pub async fn semantic_query_handler(
     State(state): State<AppState>,
     Json(payload): Json<QueryRequest>,
 ) -> Result<Json<SemanticQueryResult>, (StatusCode, Json<ErrorResponse>)> {
-    let query = validate_query_str(&payload.query, "Query")?;
+    let query = validate_query_str(&payload.query, "Query", state.max_query_chars())?;
 
     let result = run_semantic_pipeline(&state, query).await.map_err(|e| {
         (
@@ -154,79 +150,15 @@ pub async fn semantic_query_handler(
 pub async fn router_query_handler(
     State(state): State<AppState>,
     Json(payload): Json<QueryRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let query = validate_query_str(&payload.query, "Query")?;
-
-    let full_prompt = build_routing_prompt(query);
-    match state.llm_client.prompt_model(&full_prompt).await {
-        Ok(raw_json) => {
-            let decision: RouterDecision =
-                parse_llm_json(&raw_json).unwrap_or_else(|_| RouterDecision {
-                    route: "SEMANTIC".to_string(),
-                });
-
-            if decision.route == "SQL" {
-                let sql_prompt = build_sql_prompt(query);
-                let raw_sql_json =
-                    state
-                        .llm_client
-                        .prompt_model(&sql_prompt)
-                        .await
-                        .map_err(|e| {
-                            (
-                                StatusCode::BAD_GATEWAY,
-                                Json(ErrorResponse::new(format!("Ollama SQL generator offline: {}", e))),
-                            )
-                        })?;
-                let sql_resp: SqlResponse = parse_llm_json(&raw_sql_json).map_err(|e| {
-                    (
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        Json(ErrorResponse::new(format!("Invalid SQL schema: {}", e))),
-                    )
-                })?;
-                let batches = execute_sql_query(&state.sql_engine, &sql_resp.query)
-                    .await
-                    .map_err(|e| {
-                        (
-                            StatusCode::BAD_REQUEST,
-                            Json(ErrorResponse::new(format!("SQL Execution Error: {}", e))),
-                        )
-                    })?;
-                let lines = record_batches_to_json_lines(&batches).map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse::new(format!("Serialization Error: {}", e))),
-                    )
-                })?;
-                let mut json_rows = Vec::with_capacity(lines.len());
-                for line in lines {
-                    let val: serde_json::Value = serde_json::from_str(&line).map_err(|e| {
-                        (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(ErrorResponse::new(format!("Row parsing error: {}", e))),
-                        )
-                    })?;
-                    json_rows.push(val);
-                }
-                Ok(Json(serde_json::json!({
-                    "route": "SQL",
-                    "generated_sql": sql_resp.query,
-                    "results": json_rows
-                })))
-            } else {
-                let sem_resp = semantic_query_handler(State(state), Json(payload)).await?;
-                Ok(Json(serde_json::json!({
-                    "route": "SEMANTIC",
-                    "response": sem_resp.0
-                })))
-            }
-        }
-        Err(_) => {
-            let sem_resp = semantic_query_handler(State(state), Json(payload)).await?;
-            Ok(Json(serde_json::json!({
-                "route": "SEMANTIC_FALLBACK",
-                "response": sem_resp.0
-            })))
-        }
-    }
+) -> Result<Json<RoutedQueryResult>, (StatusCode, Json<ErrorResponse>)> {
+    let query = validate_query_str(&payload.query, "Query", state.max_query_chars())?;
+    let result = run_routed_pipeline(&state, query)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new(format!("Routed query error: {}", e))),
+            )
+        })?;
+    Ok(Json(result))
 }

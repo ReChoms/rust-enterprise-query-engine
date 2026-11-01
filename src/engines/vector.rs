@@ -104,7 +104,8 @@ pub async fn execute_semantic_search(
     info!("Embedding search query...");
     let embeddings = get_embeddings(vec![query.to_string()], tokenizer, model).await?;
     let query_vector = embeddings.into_iter().next().ok_or_else(|| anyhow!("Failed to generate embedding"))?;
-    execute_semantic_search_vector(query_vector, db_uri, filters).await
+    let ordered = execute_semantic_search_vector(query_vector, db_uri, filters).await?;
+    Ok(ordered.into_iter().collect())
 }
 
 #[tracing::instrument(name = "engine_lancedb_hybrid_search", skip(query_vector))]
@@ -115,6 +116,14 @@ pub async fn execute_hybrid_search(
 ) -> Result<Vec<(String, Arc<str>)>> {
     info!("Connecting to LanceDB...");
     let vector_db = lancedb::connect(db_uri).execute().await?;
+    execute_hybrid_search_on_connection(query_vector, &vector_db, filters).await
+}
+
+pub async fn execute_hybrid_search_on_connection(
+    query_vector: Vec<f32>,
+    vector_db: &lancedb::Connection,
+    filters: &[String],
+) -> Result<Vec<(String, Arc<str>)>> {
     let target_table = vector_db.open_table("customers").execute().await?;
 
     let mut retrieved_chunks = HashMap::new();
@@ -155,9 +164,16 @@ pub async fn execute_semantic_search_vector(
     query_vector: Vec<f32>,
     db_uri: &str,
     filters: &[String],
-) -> Result<HashMap<String, Arc<str>>> {
-    let ordered = execute_hybrid_search(query_vector, db_uri, filters).await?;
-    Ok(ordered.into_iter().collect())
+) -> Result<Vec<(String, Arc<str>)>> {
+    execute_hybrid_search(query_vector, db_uri, filters).await
+}
+
+pub async fn execute_semantic_search_vector_on_connection(
+    query_vector: Vec<f32>,
+    vector_db: &lancedb::Connection,
+    filters: &[String],
+) -> Result<Vec<(String, Arc<str>)>> {
+    execute_hybrid_search_on_connection(query_vector, vector_db, filters).await
 }
 
 pub fn build_fallback_sql(intent: &str) -> String {

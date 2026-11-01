@@ -1,12 +1,20 @@
 //! Altitude 1: In-Memory Semantic Cache
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
-use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn current_epoch_nanos() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
 
 pub struct CacheEntry {
     pub query: String,
     pub embedding: Box<[f32]>,
     pub response: Box<[u8]>,
-    pub last_accessed: Instant,
+    pub last_accessed: AtomicU64,
 }
 
 pub struct SemanticCache {
@@ -20,33 +28,33 @@ impl SemanticCache {
         Self { entries: RwLock::new(Vec::with_capacity(capacity)), capacity, threshold }
     }
     pub fn get_exact(&self, query: &str) -> Option<Box<[u8]>> {
-        let mut entries = self.entries.write().ok()?;
+        let entries = self.entries.read().ok()?;
         let norm = query.trim();
-        for entry in entries.iter_mut() {
+        for entry in entries.iter() {
             if entry.query.trim().eq_ignore_ascii_case(norm) {
-                entry.last_accessed = Instant::now();
+                entry.last_accessed.store(current_epoch_nanos(), Ordering::Relaxed);
                 return Some(entry.response.clone());
             }
         }
         None
     }
     pub fn get_similar(&self, query_emb: &[f32]) -> Option<Box<[u8]>> {
-        let mut entries = self.entries.write().ok()?;
+        let entries = self.entries.read().ok()?;
         let mut best_sim = -1.0f32;
-        let mut best_idx: Option<usize> = None;
-        for (idx, entry) in entries.iter().enumerate() {
+        let mut best_entry: Option<&CacheEntry> = None;
+        for entry in entries.iter() {
             if entry.embedding.len() == query_emb.len() {
                 let dot: f32 = entry.embedding.iter().zip(query_emb).map(|(a, b)| a * b).sum();
                 if dot > best_sim {
                     best_sim = dot;
-                    best_idx = Some(idx);
+                    best_entry = Some(entry);
                 }
             }
         }
         if best_sim >= self.threshold {
-            if let Some(idx) = best_idx {
-                entries[idx].last_accessed = Instant::now();
-                return Some(entries[idx].response.clone());
+            if let Some(entry) = best_entry {
+                entry.last_accessed.store(current_epoch_nanos(), Ordering::Relaxed);
+                return Some(entry.response.clone());
             }
         }
         None
@@ -54,11 +62,16 @@ impl SemanticCache {
     pub fn insert(&self, query: String, embedding: Box<[f32]>, response: Box<[u8]>) {
         let mut entries = match self.entries.write() { Ok(e) => e, Err(_) => return };
         if entries.len() >= self.capacity && !entries.is_empty() {
-            if let Some((idx, _)) = entries.iter().enumerate().min_by_key(|(_, e)| e.last_accessed) {
+            if let Some((idx, _)) = entries.iter().enumerate().min_by_key(|(_, e)| e.last_accessed.load(Ordering::Relaxed)) {
                 entries.remove(idx);
             }
         }
-        entries.push(CacheEntry { query, embedding, response, last_accessed: Instant::now() });
+        entries.push(CacheEntry {
+            query,
+            embedding,
+            response,
+            last_accessed: AtomicU64::new(current_epoch_nanos()),
+        });
     }
     pub fn len(&self) -> usize { self.entries.read().map(|e| e.len()).unwrap_or(0) }
     pub fn is_empty(&self) -> bool { self.len() == 0 }

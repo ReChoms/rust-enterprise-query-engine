@@ -158,3 +158,31 @@ async fn test_handle_load_shed_error_mappings() {
     );
     assert_eq!(body_500.get("status_code").and_then(|v| v.as_i64()), Some(500));
 }
+
+#[tokio::test]
+async fn test_http_router_query_endpoint() {
+    let (model, tokenizer) = load_model().await.expect("Failed to load model");
+    let sql_engine = init_datafusion().await.expect("Failed to init DataFusion");
+    let llm_client = OllamaClient::init_from_env_or_default().expect("Failed init client");
+    let state = AppState::new(
+        Arc::new(llm_client),
+        Arc::new(sql_engine),
+        Arc::clone(&model),
+        Arc::clone(&tokenizer),
+        "data/sap_vectors".to_string(),
+    );
+    let app = create_router(state);
+    let req_body = serde_json::json!({ "query": "SELECT kunnr FROM kna1" });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/query")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}

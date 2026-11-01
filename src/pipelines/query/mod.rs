@@ -29,7 +29,7 @@ pub use prompts::{
     build_question_parser_prompt, build_routing_prompt, build_semantic_prompt, build_sql_prompt,
     SAP_KNA1_SCHEMA,
 };
-pub use router::classify_intent;
+pub use router::{classify_intent, run_routed_pipeline, RoutedQueryResult};
 
 /// Shared application state containing read-only singleton models and contexts.
 #[derive(Clone)]
@@ -39,7 +39,10 @@ pub struct AppState {
     pub embedding_model: Arc<BertModel>,
     pub tokenizer: Arc<Tokenizer>,
     pub vector_db_uri: String,
+    pub lancedb_conn: Option<Arc<lancedb::Connection>>,
     pub semantic_cache: Arc<crate::engines::SemanticCache>,
+    pub cross_encoder: Option<Arc<crate::engines::rerank::CrossEncoder>>,
+    pub max_query_chars: usize,
 }
 
 impl AppState {
@@ -52,14 +55,33 @@ impl AppState {
     ) -> Self {
         let capacity = std::env::var("SEMANTIC_CACHE_CAPACITY").ok().and_then(|v| v.parse().ok()).unwrap_or(1_024);
         let threshold = std::env::var("SEMANTIC_CACHE_THRESHOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(0.95);
+        let max_query_chars = std::env::var("MAX_QUERY_CHARS").ok().and_then(|v| v.parse().ok()).unwrap_or(4_096);
         Self {
             llm_client,
             sql_engine,
             embedding_model,
             tokenizer,
             vector_db_uri,
+            lancedb_conn: None,
             semantic_cache: Arc::new(crate::engines::SemanticCache::new(capacity, threshold)),
+            cross_encoder: None,
+            max_query_chars,
         }
+    }
+
+    #[inline]
+    pub fn max_query_chars(&self) -> usize {
+        self.max_query_chars
+    }
+
+    pub fn with_cross_encoder(mut self, cross_encoder: Option<Arc<crate::engines::rerank::CrossEncoder>>) -> Self {
+        self.cross_encoder = cross_encoder;
+        self
+    }
+
+    pub fn with_lancedb_connection(mut self, conn: Option<Arc<lancedb::Connection>>) -> Self {
+        self.lancedb_conn = conn;
+        self
     }
 }
 
@@ -179,18 +201,42 @@ pub async fn run_semantic_pipeline(state: &AppState, query: &str) -> Result<Sema
         }
     }
 
-    let chunks = crate::engines::vector::execute_semantic_search_vector(
-        query_vector.clone(),
-        &state.vector_db_uri,
-        &parsed_query.filters,
-    ).await?;
+    let chunks = match &state.lancedb_conn {
+        Some(conn) => {
+            crate::engines::vector::execute_semantic_search_vector_on_connection(
+                query_vector.clone(),
+                conn,
+                &parsed_query.filters,
+            ).await?
+        }
+        None => {
+            crate::engines::vector::execute_semantic_search_vector(
+                query_vector.clone(),
+                &state.vector_db_uri,
+                &parsed_query.filters,
+            ).await?
+        }
+    };
+
+    let candidate_chunks = match &state.cross_encoder {
+        Some(encoder) => {
+            info!("Re-ranking coarse candidates with Cross-Encoder (spawn_blocking)...");
+            let query_owned = query.to_string();
+            let encoder = Arc::clone(encoder);
+            tokio::task::spawn_blocking(move || {
+                encoder.rerank(&query_owned, chunks, 3)
+            })
+            .await??
+        }
+        None => chunks,
+    };
 
     info!("Passing retrieved chunks to LLM for deterministic generation...");
-    let prompt_chunks: Vec<_> = chunks.iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect();
+    let prompt_chunks: Vec<_> = candidate_chunks.iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect();
     let semantic_prompt = build_semantic_prompt(query, &prompt_chunks);
     let raw_llm_output = match state.llm_client.prompt_model(&semantic_prompt).await {
         Ok(raw) => raw,
-        Err(err) => return Ok(build_degraded_response(chunks, err)),
+        Err(err) => return Ok(build_degraded_response(candidate_chunks, err)),
     };
 
     let mut final_payload = verify_and_parse_llm_generation(&raw_llm_output, &prompt_chunks)?;

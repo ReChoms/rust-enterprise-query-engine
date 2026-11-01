@@ -47,10 +47,7 @@ impl QueryService for QueryServiceImpl {
         req: Request<SqlQueryRequest>,
     ) -> Result<Response<SqlQueryResponse>, Status> {
         let query = req.into_inner().query;
-        let max_chars = std::env::var("MAX_QUERY_CHARS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(4_096);
+        let max_chars = self.state.max_query_chars();
         let trimmed = query.trim();
         if trimmed.is_empty() {
             return Err(Status::invalid_argument("SQL query cannot be empty"));
@@ -83,10 +80,7 @@ impl QueryService for QueryServiceImpl {
         req: Request<SemanticQueryRequest>,
     ) -> Result<Response<SemanticQueryResponse>, Status> {
         let inner = req.into_inner();
-        let max_chars = std::env::var("MAX_QUERY_CHARS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(4_096);
+        let max_chars = self.state.max_query_chars();
         let trimmed = inner.query.trim();
         if trimmed.is_empty() {
             return Err(Status::invalid_argument("Semantic query cannot be empty"));

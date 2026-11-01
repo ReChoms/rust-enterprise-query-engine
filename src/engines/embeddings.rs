@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokenizers::Tokenizer;
 use tracing::info;
 
-async fn download_file(url: &str, dest: &str) -> Result<String> {
+pub(crate) async fn download_file(url: &str, dest: &str) -> Result<String> {
     if !Path::new(dest).exists() {
         info!("Downloading {}...", dest);
         let resp = reqwest::get(url).await?;

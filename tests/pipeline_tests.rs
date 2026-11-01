@@ -182,3 +182,25 @@ fn test_degraded_response_serialization() {
     assert!(json.contains("\"degraded\":true"));
     assert!(json.contains("Customer Acme in Berlin"));
 }
+
+#[tokio::test]
+async fn test_run_routed_pipeline_execution() {
+    let (model, tokenizer) = load_model().await.expect("Failed to load model");
+    let sql_engine = rust_enterprise_query_engine::engines::sql::init_datafusion()
+        .await
+        .expect("Failed to init DataFusion");
+    let llm_client = OllamaClient::init_from_env_or_default().expect("Failed init client");
+    let state = rust_enterprise_query_engine::pipelines::query::AppState::new(
+        Arc::new(llm_client),
+        Arc::new(sql_engine),
+        Arc::clone(&model),
+        Arc::clone(&tokenizer),
+        "data/sap_vectors".to_string(),
+    );
+    let result = rust_enterprise_query_engine::pipelines::query::run_routed_pipeline(
+        &state,
+        "SELECT kunnr FROM kna1",
+    )
+    .await;
+    assert!(result.is_ok());
+}
